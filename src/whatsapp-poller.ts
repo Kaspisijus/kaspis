@@ -15,6 +15,7 @@ import axios from "axios";
 import path from "path";
 import { fileURLToPath } from "url";
 import { BrunasApiClient } from "./brunas-api.js";
+import OpenAI from "openai";
 
 // ─── Config ──────────────────────────────────────────────────────────
 
@@ -37,6 +38,19 @@ const WHATSAPP_DB_PATH = path.resolve(
   "store",
   "whatsapp.db"
 );
+
+// ─── LLM (OpenAI-compatible) ─────────────────────────────────────────
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
+const LLM_MODEL = process.env.LLM_MODEL ?? "gpt-4o-mini";
+const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL ?? undefined;
+
+let openai: OpenAI | null = null;
+function getOpenAI(): OpenAI | null {
+  if (!OPENAI_API_KEY) return null;
+  if (!openai) openai = new OpenAI({ apiKey: OPENAI_API_KEY, baseURL: OPENAI_BASE_URL });
+  return openai;
+}
 
 // ─── Allowed users ───────────────────────────────────────────────────
 
@@ -403,6 +417,16 @@ async function executeCommand(cmd: ParsedCommand): Promise<string> {
           chatJid: cmd._chatJid ?? "",
           timestamp: Date.now(),
         });
+        addRecentDamage(cmd._userPhone, {
+          damageId,
+          vehicleId,
+          vehicleNumber,
+          description: desc,
+          urgency,
+          category: "body-work",
+          photosAttached: 0,
+          registeredAt: Date.now(),
+        });
       }
 
       return `\u2705 Gedimas užregistruotas!\nVilkikas: ${vehicleNumber}\nAprašymas: ${desc}\nSkubumas: ${urgency === "urgent" ? "Skubus" : "Toleruojamas"}\n\nGalite siųsti nuotraukas — jos bus pridėtos prie šio gedimo.`;
@@ -653,6 +677,159 @@ function clearPending(userPhone: string): void {
   pendingActions.delete(userPhone);
 }
 
+// ─── Per-user conversation history (for LLM context) ─────────────────
+
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  timestamp: number;
+}
+
+interface RecentDamage {
+  damageId: string;
+  vehicleId: number;
+  vehicleNumber: string;
+  description: string;
+  urgency: string;
+  category: string;
+  photosAttached: number;
+  registeredAt: number;
+}
+
+const userHistory = new Map<string, ChatMessage[]>();
+const userRecentDamages = new Map<string, RecentDamage[]>();
+const HISTORY_MAX = 20;
+const RECENT_DAMAGE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+function addToHistory(userPhone: string, role: "user" | "assistant", content: string): void {
+  if (!userHistory.has(userPhone)) userHistory.set(userPhone, []);
+  const hist = userHistory.get(userPhone)!;
+  hist.push({ role, content, timestamp: Date.now() });
+  if (hist.length > HISTORY_MAX) hist.splice(0, hist.length - HISTORY_MAX);
+}
+
+function getHistory(userPhone: string): ChatMessage[] {
+  return userHistory.get(userPhone) ?? [];
+}
+
+function addRecentDamage(userPhone: string, damage: RecentDamage): void {
+  if (!userRecentDamages.has(userPhone)) userRecentDamages.set(userPhone, []);
+  const list = userRecentDamages.get(userPhone)!;
+  list.push(damage);
+  const now = Date.now();
+  while (list.length > 0 && now - list[0].registeredAt > RECENT_DAMAGE_TTL_MS) {
+    list.shift();
+  }
+}
+
+function getRecentDamages(userPhone: string): RecentDamage[] {
+  const list = userRecentDamages.get(userPhone) ?? [];
+  const now = Date.now();
+  return list.filter((d) => now - d.registeredAt < RECENT_DAMAGE_TTL_MS);
+}
+
+function updateDamagePhotoCount(userPhone: string, damageId: string, count: number): void {
+  const list = userRecentDamages.get(userPhone);
+  if (!list) return;
+  const d = list.find((x) => x.damageId === damageId);
+  if (d) d.photosAttached += count;
+}
+
+// ─── LLM-powered smart routing ──────────────────────────────────────
+
+interface LLMDecision {
+  action: "attach_photos" | "register_damage" | "reply" | "command";
+  damageId?: string;
+  vehicleNumber?: string;
+  description?: string;
+  urgency?: string;
+  text?: string;
+  rawCommand?: string;
+}
+
+const LLM_SYSTEM_PROMPT = `Tu esi transporto įmonės asistentas WhatsApp žinutėse. Kalbi lietuviškai.
+Tavo darbas — suprasti vartotojo žinutę ir nuspręsti, kokį veiksmą atlikti.
+
+Galimi veiksmai (atsakyk JSON formatu):
+
+1. {"action": "attach_photos", "damageId": "<id>", "vehicleNumber": "<nr>"}
+   — Kai vartotojas siunčia nuotrauką/vaizdo įrašą ir yra neseniai registruotas gedimas, kuriam galima pridėti
+
+2. {"action": "register_damage", "vehicleNumber": "<nr>", "description": "<aprašymas>", "urgency": "tolerable|urgent"}
+   — Kai vartotojas nori registruoti naują gedimą
+
+3. {"action": "command", "rawCommand": "<originali žinutė>"}
+   — Kai vartotojas klausia apie reisus, vilkikus, vairuotojus (pvz: "reisas 5268", "vilkikas nbo401", "vairuotojai")
+
+4. {"action": "reply", "text": "<atsakymas>"}
+   — Kai reikia paklausti patikslinimo arba atsakyti į bendrą klausimą
+
+TAISYKLĖS:
+- Jei vartotojas siunčia nuotrauką/video ir per paskutinę valandą buvo registruotas gedimas — VISADA paklausk ar pridėti prie to gedimo (action: "reply" su klausimu lietuviškai)
+- Jei yra keli neseniai registruoti gedimai — paklausk, prie kurio pridėti
+- Jei vartotojas aiškiai patvirtina pridėti prie konkretaus gedimo — naudok "attach_photos" su tuo damageId
+- Jei žinutė aiškiai yra komanda (reisas, vilkikas, gedimas, vairuotojai) — naudok "command"
+- Niekada nesugalvok damageId — naudok tik iš pateikto konteksto
+- Atsakyk TIKTAI JSON formatu, be jokio papildomo teksto`;
+
+async function askLLM(
+  userPhone: string,
+  userName: string,
+  messageContent: string,
+  mediaType: string,
+): Promise<LLMDecision | null> {
+  const ai = getOpenAI();
+  if (!ai) return null;
+
+  const history = getHistory(userPhone);
+  const recentDamages = getRecentDamages(userPhone);
+
+  let contextBlock = "";
+  if (recentDamages.length > 0) {
+    contextBlock += "\nNeseniai registruoti gedimai šiam vartotojui:\n";
+    for (const d of recentDamages) {
+      const ago = Math.round((Date.now() - d.registeredAt) / 60000);
+      contextBlock += `- ID: ${d.damageId}, Vilkikas: ${d.vehicleNumber}, Aprašymas: "${d.description}", Skubumas: ${d.urgency}, Nuotraukų: ${d.photosAttached}, Prieš ${ago} min.\n`;
+    }
+  }
+
+  const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+    { role: "system", content: LLM_SYSTEM_PROMPT + contextBlock },
+  ];
+
+  // Add recent conversation history (last 6 messages)
+  const recent = history.slice(-6);
+  for (const h of recent) {
+    messages.push({ role: h.role, content: h.content });
+  }
+
+  // Add current message
+  const currentContent = mediaType
+    ? `[Vartotojas ${userName} atsiuntė ${mediaType === "video" ? "vaizdo įrašą" : "nuotrauką"}]${messageContent ? " " + messageContent : ""}`
+    : messageContent;
+  messages.push({ role: "user", content: currentContent });
+
+  try {
+    const response = await ai.chat.completions.create({
+      model: LLM_MODEL,
+      messages,
+      temperature: 0.1,
+      max_tokens: 300,
+    });
+
+    const raw = response.choices[0]?.message?.content?.trim() ?? "";
+    console.log(`    [LLM] Raw: ${raw}`);
+
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+
+    return JSON.parse(jsonMatch[0]) as LLMDecision;
+  } catch (err) {
+    console.error(`    [LLM] Error: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+}
+
 // Track processed message IDs to avoid double-processing
 const processedMessages = new Set<string>();
 const MAX_PROCESSED_CACHE = 1000;
@@ -728,8 +905,39 @@ async function poll(): Promise<void> {
           console.log(`  → Photo collected (${pending.photoMessageIds.length}), awaiting confirm`);
           continue;
         }
-        // Image/video but no pending damage — ignore silently
-        console.log(`  → ${msg.mediaType} message, no pending damage — skipped`);
+        // No pending state — ask LLM if there's a recent damage to attach to
+        console.log(`  → ${msg.mediaType} message, no pending — asking LLM...`);
+        addToHistory(user.phone, "user", `[${msg.mediaType}]`);
+        const decision = await askLLM(user.phone, user.name, msg.content, msg.mediaType);
+        if (decision?.action === "attach_photos" && decision.damageId) {
+          const recentDamage = getRecentDamages(user.phone).find((d) => d.damageId === decision.damageId);
+          if (recentDamage) {
+            setPending(user.phone, {
+              type: "damage_confirm_photos",
+              damageId: recentDamage.damageId,
+              vehicleId: recentDamage.vehicleId,
+              vehicleNumber: recentDamage.vehicleNumber,
+              description: recentDamage.description,
+              urgency: recentDamage.urgency as "urgent" | "tolerable",
+              category: recentDamage.category,
+              photoMessageIds: [{ id: msg.id, chatJid: msg.chatJid }],
+              chatJid: msg.chatJid,
+              timestamp: Date.now(),
+            });
+            const reply = `📷 Gauta 1 nuotrauka.\nPridėti prie gedimo (${recentDamage.vehicleNumber})?\nRašykite *Taip* arba *Ne*.`;
+            await sendWhatsApp(msg.chatJid, reply);
+            addToHistory(user.phone, "assistant", reply);
+            console.log(`  → LLM: attach to ${recentDamage.vehicleNumber}, awaiting confirm`);
+            continue;
+          }
+        }
+        if (decision?.action === "reply" && decision.text) {
+          await sendWhatsApp(msg.chatJid, decision.text);
+          addToHistory(user.phone, "assistant", decision.text);
+          console.log(`  → LLM replied (${decision.text.length} chars)`);
+          continue;
+        }
+        console.log(`  → LLM: no action for ${msg.mediaType}`);
         continue;
       }
 
@@ -756,6 +964,7 @@ async function poll(): Promise<void> {
               msg.chatJid,
               `✅ ${urls.length} nuotrauk${urls.length === 1 ? "a pridėta" : "os pridėtos"} prie gedimo (${pendingCheck.vehicleNumber}).`
             );
+            updateDamagePhotoCount(user.phone, pendingCheck.damageId, urls.length);
             console.log(`  → ${urls.length} photos uploaded and attached to damage ${pendingCheck.damageId}`);
           } catch (err) {
             const errMsg = err instanceof Error ? err.message : String(err);
@@ -811,19 +1020,75 @@ async function poll(): Promise<void> {
       }
 
       if (cmd.type === "unknown") {
-        await sendWhatsApp(
-          msg.chatJid,
+        // Try LLM before falling back to help
+        addToHistory(user.phone, "user", msg.content);
+        const decision = await askLLM(user.phone, user.name, msg.content, "");
+
+        if (decision?.action === "register_damage" && decision.vehicleNumber) {
+          const clarifyCmd: ParsedCommand = {
+            type: "register_damage",
+            filters: [],
+            pageSize: 0,
+            damageVehicle: decision.vehicleNumber.toUpperCase().replace(/[^A-Z0-9]/g, ""),
+            damageDescription: decision.description ?? "",
+            _userPhone: user.phone,
+            _chatJid: msg.chatJid,
+          };
+          try {
+            const result = await executeCommand(clarifyCmd);
+            if (result) {
+              await sendWhatsApp(msg.chatJid, result);
+              addToHistory(user.phone, "assistant", result);
+              console.log(`  → LLM→register_damage (${result.length} chars)`);
+            }
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await sendWhatsApp(msg.chatJid, `❌ Klaida: ${errMsg}`);
+          }
+          continue;
+        }
+
+        if (decision?.action === "command" && decision.rawCommand) {
+          const retryCmd = parseCommand(decision.rawCommand);
+          if (retryCmd.type !== "unknown") {
+            retryCmd._userPhone = user.phone;
+            retryCmd._chatJid = msg.chatJid;
+            try {
+              const result = await executeCommand(retryCmd);
+              if (result) {
+                await sendWhatsApp(msg.chatJid, result);
+                addToHistory(user.phone, "assistant", result);
+                console.log(`  → LLM→command (${result.length} chars)`);
+              }
+            } catch (err) {
+              const errMsg = err instanceof Error ? err.message : String(err);
+              await sendWhatsApp(msg.chatJid, `❌ Klaida: ${errMsg}`);
+            }
+            continue;
+          }
+        }
+
+        if (decision?.action === "reply" && decision.text) {
+          await sendWhatsApp(msg.chatJid, decision.text);
+          addToHistory(user.phone, "assistant", decision.text);
+          console.log(`  → LLM replied (${decision.text.length} chars)`);
+          continue;
+        }
+
+        // Final fallback — help message
+        const helpMsg =
           `Sveiki, ${user.name}! Nesupratau užklausos.\n\n` +
-            `Galimos komandos:\n` +
-            `• *Reisas <nr>* — gauti reiso informaciją\n` +
-            `• *Reisai* — paskutinių reisų sąrašas\n` +
-            `• *Reisai <valst. nr>* — reisai pagal vilkiką\n` +
-            `• *Vilkikas <valst. nr>* — vilkiko informacija\n` +
-            `• *Vairuotojai* — vairuotojų sąrašas\n` +
-            `• *Gedimas <valst. nr> <aprašymas>* — registruoti gedimą\n\n` +
-            `Pavyzdžiai: "Reisas 5268", "Reisai LBK608", "Gedimas NBO401 sugedo veidrodis"`
-        );
-        console.log(`  → Unknown command, sent help`);
+          `Galimos komandos:\n` +
+          `• *Reisas <nr>* — gauti reiso informaciją\n` +
+          `• *Reisai* — paskutinių reisų sąrašas\n` +
+          `• *Reisai <valst. nr>* — reisai pagal vilkiką\n` +
+          `• *Vilkikas <valst. nr>* — vilkiko informacija\n` +
+          `• *Vairuotojai* — vairuotojų sąrašas\n` +
+          `• *Gedimas <valst. nr> <aprašymas>* — registruoti gedimą\n\n` +
+          `Pavyzdžiai: "Reisas 5268", "Reisai LBK608", "Gedimas NBO401 sugedo veidrodis"`;
+        await sendWhatsApp(msg.chatJid, helpMsg);
+        addToHistory(user.phone, "assistant", helpMsg);
+        console.log(`  → Unknown command, LLM no decision, sent help`);
         continue;
       }
 
@@ -832,9 +1097,11 @@ async function poll(): Promise<void> {
         clearPending(user.phone); // new command clears any pending clarification
         cmd._userPhone = user.phone;
         cmd._chatJid = msg.chatJid;
+        addToHistory(user.phone, "user", msg.content);
         const result = await executeCommand(cmd);
         if (result) {
           await sendWhatsApp(msg.chatJid, result);
+          addToHistory(user.phone, "assistant", result);
           console.log(`  → Replied (${result.length} chars)`);
         }
       } catch (err) {
@@ -874,6 +1141,7 @@ async function main(): Promise<void> {
   console.log(
     `  Authorized users: ${ALLOWED_USERS.map((u) => u.name).join(", ")}`
   );
+  console.log(`  LLM: ${OPENAI_API_KEY ? `${LLM_MODEL}${OPENAI_BASE_URL ? ` (${OPENAI_BASE_URL})` : ""}` : "disabled (no OPENAI_API_KEY)"}`);
 
   // Set initial watermark to now (only process NEW messages)
   const db = await openDb();
