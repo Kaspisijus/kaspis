@@ -199,6 +199,24 @@ const tools = [
       required: ["query"],
     },
   },
+  // ── Vehicle Service ─────────────────────────────────────────
+  {
+    name: "register_damage",
+    description: `Register a vehicle damage/failure in Brunas TMS.
+Urgency values: tolerable, urgent, critical
+Category values: body-work, engine, transmission, electrical, brakes, suspension, tires, other`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        vehicleId: { type: "number", description: "Vehicle ID (from search_vehicles or carriage data)" },
+        description: { type: "string", description: "Damage description" },
+        urgency: { type: "string", description: "Urgency: tolerable, urgent, or critical (default: tolerable)" },
+        category: { type: "string", description: "Category: body-work, engine, transmission, electrical, brakes, suspension, tires, other (default: body-work)" },
+        trailerId: { type: "number", description: "Trailer ID if damage is on trailer (optional)" },
+      },
+      required: ["vehicleId", "description"],
+    },
+  },
 ];
 
 // ─── MCP Server ──────────────────────────────────────────────────────
@@ -303,6 +321,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidRequest, "query is required");
         }
         const data = await client.searchActiveVehicles(query);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      // ── Register vehicle damage ──────────────────────────────
+      case "register_damage": {
+        const vehicleId = args.vehicleId as number;
+        const description = args.description as string;
+        if (!vehicleId || !description) {
+          throw new McpError(ErrorCode.InvalidRequest, "vehicleId and description are required");
+        }
+        const data = await client.registerVehicleDamage({
+          vehicleId,
+          description,
+          urgency: (args.urgency as string) ?? "tolerable",
+          category: (args.category as string) ?? "body-work",
+          trailerId: (args.trailerId as number) ?? null,
+        });
         return {
           content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
         };

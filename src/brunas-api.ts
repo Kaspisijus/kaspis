@@ -212,4 +212,29 @@ export class BrunasApiClient {
     );
     return response.data;
   }
+
+  // ─── Vehicle Service ──────────────────────────────────────
+
+  async registerVehicleDamage(opts: {
+    vehicleId: number;
+    description: string;
+    urgency?: string;
+    category?: string;
+    trailerId?: number | null;
+  }): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.post(
+      "/api/v2/vehicle-failures",
+      {
+        vehicleId: opts.vehicleId,
+        description: opts.description,
+        urgency: opts.urgency ?? "tolerable",
+        category: opts.category ?? "body-work",
+        trailerId: opts.trailerId ?? null,
+        status: "pending",
+        photos: [],
+      }
+    );
+    return response.data;
+  }
 }

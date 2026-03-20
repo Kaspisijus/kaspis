@@ -90,16 +90,32 @@ const TASK_TYPES: Record<number, string> = {
 // ─── Command parsing & execution ─────────────────────────────────────
 
 interface ParsedCommand {
-  type: "find_carriages" | "carriages_by_vehicle" | "find_drivers" | "find_vehicles" | "search_vehicles" | "unknown";
+  type: "find_carriages" | "carriages_by_vehicle" | "find_drivers" | "find_vehicles" | "search_vehicles" | "register_damage" | "unknown";
   filters: Array<{ field: string; value: string | string[] | number[]; operator: string }>;
   quickFilter?: string[];
   pageSize: number;
   vehiclePlate?: string;
   searchQuery?: string;
+  damageVehicle?: string;
+  damageDescription?: string;
 }
 
 function parseCommand(text: string): ParsedCommand {
   const lower = text.toLowerCase().trim();
+
+  // Register damage (e.g. "gedimas NBO401 kažkas sugedo", "damage LBK608 broken mirror")
+  const damageMatch = lower.match(
+    /(?:gedim\w*|damage|registruoti gedim\w*|prideti gedim\w*|register damage|add damage)\s+(\S+)\s+(.*)/i
+  );
+  if (damageMatch) {
+    return {
+      type: "register_damage",
+      filters: [],
+      pageSize: 0,
+      damageVehicle: damageMatch[1].toUpperCase(),
+      damageDescription: damageMatch[2].trim(),
+    };
+  }
 
   // Find carriage by ID (e.g. "carriage 5268", "reisas 5268", "#5268")
   const carriageIdMatch = lower.match(
@@ -321,6 +337,31 @@ async function executeCommand(cmd: ParsedCommand): Promise<string> {
       return vehicles.map(formatVehicleDetailed).join("\n\n");
     }
 
+    case "register_damage": {
+      // Step 1: find vehicle by plate
+      const vData = (await client.searchActiveVehicles(cmd.damageVehicle!)) as {
+        data: Record<string, unknown>[];
+      };
+      const vehicles = vData.data ?? [];
+      if (vehicles.length === 0) return `Vehicle "${cmd.damageVehicle}" not found. Cannot register damage.`;
+      const vehicle = vehicles[0];
+      const vehicleId = vehicle.id as number;
+      const vehicleNumber = vehicle.number as string;
+
+      // Detect urgency from description
+      const desc = cmd.damageDescription ?? "";
+      const isUrgent = /\b(urgent|skub\w*|critical|kritin\w*)\b/i.test(desc);
+      const urgency = isUrgent ? "urgent" : "tolerable";
+
+      // Step 2: register damage
+      const result = await client.registerVehicleDamage({
+        vehicleId,
+        description: desc,
+        urgency,
+      });
+      return `\u2705 Gedimas užregistruotas!\nVilkikas: ${vehicleNumber}\nAprašymas: ${desc}\nSkubumas: ${urgency === "urgent" ? "Skubus" : "Toleruojamas"}`;
+    }
+
     default:
       return "";
   }
@@ -480,9 +521,10 @@ async function poll(): Promise<void> {
             `• *Reisas <nr>* — gauti reiso informaciją\n` +
             `• *Reisai* — paskutinių reisų sąrašas\n` +
             `• *Reisai <valst. nr>* — reisai pagal vilkiką\n` +
+            `• *Vilkikas <valst. nr>* — vilkiko informacija\n` +
             `• *Vairuotojai* — vairuotojų sąrašas\n` +
-            `• *Auto* — transporto priemonių sąrašas\n\n` +
-            `Pavyzdžiai: "Reisas 5268", "Reisai LBK608", "Vairuotojai"`
+            `• *Gedimas <valst. nr> <aprašymas>* — registruoti gedimą\n\n` +
+            `Pavyzdžiai: "Reisas 5268", "Reisai LBK608", "Gedimas NBO401 sugedo veidrodis"`
         );
         console.log(`  → Unknown command, sent help`);
         continue;
