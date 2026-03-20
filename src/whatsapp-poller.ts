@@ -103,17 +103,19 @@ interface ParsedCommand {
 function parseCommand(text: string): ParsedCommand {
   const lower = text.toLowerCase().trim();
 
-  // Register damage (e.g. "gedimas NBO401 kažkas sugedo", "damage LBK608 broken mirror")
+  // Register damage (e.g. "gedimas NBO401 kažkas sugedo", "užregistruok gedimą NBO401, skubus, broken mirror")
   const damageMatch = lower.match(
-    /(?:gedim\w*|damage|registruoti gedim\w*|prideti gedim\w*|register damage|add damage)\s+(\S+)\s+(.*)/i
+    /(?:u[zž]registru\w+\s+gedim\w*|gedim\w*|damage|registruoti\s+gedim\w*|prideti\s+gedim\w*|register\s+damage|add\s+damage)\s+([\w\d]+)[,;\s]\s*(.*)/i
   );
   if (damageMatch) {
+    const rawVehicle = damageMatch[1].replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+    const rawDesc = damageMatch[2].trim();
     return {
       type: "register_damage",
       filters: [],
       pageSize: 0,
-      damageVehicle: damageMatch[1].toUpperCase(),
-      damageDescription: damageMatch[2].trim(),
+      damageVehicle: rawVehicle,
+      damageDescription: rawDesc,
     };
   }
 
@@ -338,23 +340,35 @@ async function executeCommand(cmd: ParsedCommand): Promise<string> {
     }
 
     case "register_damage": {
-      // Step 1: find vehicle by plate
+      // Step 1: find vehicle by plate/name
       const vData = (await client.searchActiveVehicles(cmd.damageVehicle!)) as {
         data: Record<string, unknown>[];
       };
       const vehicles = vData.data ?? [];
-      if (vehicles.length === 0) return `Vehicle "${cmd.damageVehicle}" not found. Cannot register damage.`;
+      if (vehicles.length === 0)
+        return `Transporto priemonė "${cmd.damageVehicle}" nerasta. Negalima registruoti gedimo.`;
+
+      if (vehicles.length > 1) {
+        const list = vehicles
+          .map((v, i) => `${i + 1}. ${v.number} — ${v.name ?? ""}`)
+          .join("\n");
+        return `Rasta kelios transporto priemonės pagal "${cmd.damageVehicle}":\n${list}\n\nPatikslinkite valstybinį numerį.`;
+      }
+
       const vehicle = vehicles[0];
       const vehicleId = vehicle.id as number;
       const vehicleNumber = vehicle.number as string;
 
-      // Detect urgency from description
-      const desc = cmd.damageDescription ?? "";
-      const isUrgent = /\b(urgent|skub\w*|critical|kritin\w*)\b/i.test(desc);
+      // Detect urgency from description and strip urgency keywords from final description
+      const rawDesc = cmd.damageDescription ?? "";
+      const isUrgent = /\b(urgent|skub\w*|critical|kritin\w*)\b/i.test(rawDesc);
       const urgency = isUrgent ? "urgent" : "tolerable";
+      const desc = rawDesc
+        .replace(/\b(urgent|skub\w*|critical|kritin\w*)[,;\s]*/gi, "")
+        .trim();
 
       // Step 2: register damage
-      const result = await client.registerVehicleDamage({
+      await client.registerVehicleDamage({
         vehicleId,
         description: desc,
         urgency,
