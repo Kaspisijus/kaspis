@@ -1,5 +1,22 @@
 {
 	"servers": {
+		"whatsapp": {
+			"command": "C:\\Users\\Kaspis\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\uv.exe",
+			"args": [
+				"--directory",
+				"D:\\dev\\agent\\whatsapp-mcp\\whatsapp-mcp-server",
+				"run",
+				"main.py"
+			],
+			"type": "stdio"
+		},
+		"viber-agent": {
+			"command": "node",
+			"args": [
+				"dist/index.js"
+			],
+			"type": "stdio"
+		},
 		"playwright": {
 			"command": "npx",
 			"args": [

@@ -32,3 +32,36 @@ Safety and reliability rules:
 - If multiple templates have similar names, choose exact match first, otherwise ask for confirmation.
 - After each save, verify a success toast/message or re-open tariff section to confirm template value.
 - Do not store or print credentials in files.
+
+---
+
+# Viber Agent MCP Server
+
+The project includes a custom MCP server that bridges Viber Bot API with AI agents. This allows:
+- Receiving messages from Viber users
+- Executing Playwright browser commands
+- Running system commands
+- Managing conversations with persistence
+
+## Viber MCP Server Details
+
+**Configuration**: `.vscode/mcp.json` - Contains server startup configuration
+**Source**: `src/` directory - TypeScript implementation
+**Documentation**: `.github/VIBER_MCP_GUIDE.md` - Complete development guide
+
+### Before Starting Development
+1. Install dependencies: `npm install`
+2. Copy `.env.example` to `.env` and set `VIBER_BOT_TOKEN`
+3. Build: `npm run build`
+4. See README.md for full setup instructions
+
+### Server Capabilities
+- Tool: `send_viber_message` - Send messages to Viber users
+- Tool: `execute_playwright` - Browser automation (navigate, click, type, screenshot, etc.)
+- Tool: `get_conversation_history` - Retrieve user conversation history
+- Tool: `execute_command` - Execute system commands (with caution)
+
+### MCP Server References
+- MCP Documentation: https://modelcontextprotocol.io/
+- TypeScript SDK: https://github.com/modelcontextprotocol/typescript-sdk
+- Viber Bot API: https://developers.viber.com/docs/api/rest-bot-api/
