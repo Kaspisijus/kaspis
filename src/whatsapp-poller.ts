@@ -692,8 +692,8 @@ async function poll(): Promise<void> {
         `[${new Date().toISOString()}] ${user.name}: ${msg.mediaType ? `[${msg.mediaType}] ` : ""}${msg.content.substring(0, 80)}`
       );
 
-      // ─── Handle image messages (photo flow) ───────────────────
-      if (msg.mediaType === "image") {
+      // ─── Handle image/video messages (photo flow) ────────────
+      if (msg.mediaType === "image" || msg.mediaType === "video") {
         const pending = getPending(user.phone);
         if (pending && pending.type === "damage_await_photos") {
           // First photo after damage registration — collect and ask for more or confirm
@@ -728,8 +728,8 @@ async function poll(): Promise<void> {
           console.log(`  → Photo collected (${pending.photoMessageIds.length}), awaiting confirm`);
           continue;
         }
-        // Image but no pending damage — ignore silently
-        console.log(`  → Image message, no pending damage — skipped`);
+        // Image/video but no pending damage — ignore silently
+        console.log(`  → ${msg.mediaType} message, no pending damage — skipped`);
         continue;
       }
 
