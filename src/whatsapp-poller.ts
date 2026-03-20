@@ -437,26 +437,46 @@ async function uploadAndAttachPhotos(
 
   for (const pm of photoMessages) {
     // Step 1: download from WhatsApp via bridge
+    console.log(`    [upload] Downloading message ${pm.id} from bridge...`);
     const localPath = await downloadFromBridge(pm.id, pm.chatJid);
+    console.log(`    [upload] Downloaded to: ${localPath}`);
 
     // Step 2: upload to Brunas
-    const uploadResult = (await client.uploadImage(localPath)) as {
-      data?: { fullPath?: string };
-    };
-    const fullPath = uploadResult?.data?.fullPath;
-    if (fullPath) {
-      photoUrls.push(`https://upload.brunas.lt/read/${fullPath}`);
+    console.log(`    [upload] Uploading to Brunas...`);
+    try {
+      const uploadResult = (await client.uploadImage(localPath)) as {
+        data?: { fullPath?: string };
+      };
+      console.log(`    [upload] Upload result: ${JSON.stringify(uploadResult)}`);
+      const fullPath = uploadResult?.data?.fullPath;
+      if (fullPath) {
+        photoUrls.push(`https://upload.brunas.lt/read/${fullPath}`);
+      }
+    } catch (uploadErr: unknown) {
+      const ax = uploadErr as { response?: { status?: number; data?: unknown } };
+      console.error(`    [upload] Upload failed: status=${ax.response?.status}, body=${JSON.stringify(ax.response?.data)}`);
+      throw uploadErr;
     }
   }
 
   // Step 3: update damage record with photo URLs
   if (photoUrls.length > 0) {
-    await client.updateVehicleDamage(damageId, {
+    console.log(`    [upload] Updating damage ${damageId} with ${photoUrls.length} photos...`);
+    const updatePayload = {
       ...damageData,
       trailerId: null,
       status: "pending",
       photos: photoUrls,
-    });
+    };
+    console.log(`    [upload] Update payload: ${JSON.stringify(updatePayload)}`);
+    try {
+      await client.updateVehicleDamage(damageId, updatePayload);
+      console.log(`    [upload] Damage updated successfully`);
+    } catch (updateErr: unknown) {
+      const ax = updateErr as { response?: { status?: number; data?: unknown } };
+      console.error(`    [upload] Damage update failed: status=${ax.response?.status}, body=${JSON.stringify(ax.response?.data)}`);
+      throw updateErr;
+    }
   }
 
   return photoUrls;

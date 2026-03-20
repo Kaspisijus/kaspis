@@ -256,7 +256,7 @@ export class BrunasApiClient {
   async uploadImage(filePath: string): Promise<unknown> {
     await this.ensureAuth();
     const form = new FormData();
-    form.append("image", fs.createReadStream(filePath), path.basename(filePath));
+    form.append("file", fs.createReadStream(filePath), path.basename(filePath));
     const response = await this.apiClient.post("/upload/upload", form, {
       headers: {
         ...form.getHeaders(),
