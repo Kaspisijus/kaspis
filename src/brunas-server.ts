@@ -201,6 +201,30 @@ const tools = [
   },
   // ── Vehicle Service ─────────────────────────────────────────
   {
+    name: "search_damages",
+    description: `Search vehicle damages/failures in Brunas TMS.
+Filter by vehicle (use "vehicle-{id}" format, e.g. "vehicle-1220" for NBO401), status, etc.
+Returns damage records with id, transport, description, urgency, category, status, photos, createDate, creatorName.
+Available filter fields:
+  - status (isAnyOf): pending, seen, inProgress, completed, cancelled
+  - transport (isAnyOf): use "vehicle-{vehicleId}" format, e.g. ["vehicle-1220"]
+  - category (isAnyOf): body-work, engine, transmission, electrical, brakes, suspension, tires, other
+  - urgency (isAnyOf): tolerable, urgent, critical
+  - description (contains): free text search in description
+  - creatorName (contains): who created the damage record
+  - createDate (range): creation date`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...datatableInputProperties,
+        vehicleNumber: {
+          type: "string",
+          description: "Optional shortcut: vehicle plate number (e.g. 'NBO401'). Will auto-resolve to vehicle ID and add transport filter. Requires search_vehicles lookup.",
+        },
+      },
+    },
+  },
+  {
     name: "register_damage",
     description: `Register a vehicle damage/failure in Brunas TMS.
 Urgency values: tolerable, urgent, critical
@@ -346,6 +370,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidRequest, "query is required");
         }
         const data = await client.searchActiveVehicles(query);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      // ── Search damages ───────────────────────────────────────
+      case "search_damages": {
+        let filters = (args.filters as Array<{ field: string; value: string | string[] | number | number[]; operator: string }>) ?? [];
+        const vehicleNumber = args.vehicleNumber as string | undefined;
+        if (vehicleNumber) {
+          const searchResult = await client.searchActiveVehicles(vehicleNumber) as { data?: Array<{ id: number; number: string }> };
+          const vehicles = searchResult.data ?? [];
+          const match = vehicles.find(
+            (v) => v.number.toUpperCase() === vehicleNumber.toUpperCase()
+          ) ?? vehicles[0];
+          if (!match) {
+            return {
+              content: [{ type: "text" as const, text: `Vehicle "${vehicleNumber}" not found.` }],
+            };
+          }
+          filters = [
+            ...filters,
+            { field: "transport", operator: "isAnyOf", value: [`vehicle-${match.id}`] },
+          ];
+        }
+        const data = await client.searchDamages(
+          filters,
+          (args.page as number) ?? 0,
+          (args.pageSize as number) ?? 100,
+          args.sort as Array<{ field: string; sort: "asc" | "desc" | null }> | undefined
+        );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
         };

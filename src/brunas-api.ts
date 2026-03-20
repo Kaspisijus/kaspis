@@ -253,6 +253,21 @@ export class BrunasApiClient {
     return response.data;
   }
 
+  async searchDamages(
+    filters: FilterItem[] = [],
+    page = 0,
+    pageSize = 100,
+    sort?: SortItem[]
+  ): Promise<unknown> {
+    await this.ensureAuth();
+    const body = this.buildDatatableRequest(filters, page, pageSize, sort);
+    const response = await this.apiClient.post(
+      "/api/v3/transport-failures/datatable/list",
+      body
+    );
+    return response.data;
+  }
+
   async uploadImage(filePath: string): Promise<unknown> {
     await this.ensureAuth();
     const form = new FormData();
