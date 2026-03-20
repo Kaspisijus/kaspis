@@ -98,6 +98,7 @@ interface ParsedCommand {
   searchQuery?: string;
   damageVehicle?: string;
   damageDescription?: string;
+  _userPhone?: string;
 }
 
 function parseCommand(text: string): ParsedCommand {
@@ -349,10 +350,21 @@ async function executeCommand(cmd: ParsedCommand): Promise<string> {
         return `Transporto priemonė "${cmd.damageVehicle}" nerasta. Negalima registruoti gedimo.`;
 
       if (vehicles.length > 1) {
+        // Save pending state so user can reply with just the plate
+        const rawDesc = cmd.damageDescription ?? "";
+        const isUrgentEarly = /\b(urgent|skub\w*|critical|kritin\w*)\b/i.test(rawDesc);
+        if (cmd._userPhone) {
+          setPending(cmd._userPhone, {
+            type: "damage_clarify_vehicle",
+            description: rawDesc,
+            urgency: isUrgentEarly ? "urgent" : "tolerable",
+            timestamp: Date.now(),
+          });
+        }
         const list = vehicles
           .map((v, i) => `${i + 1}. ${v.number} — ${v.name ?? ""}`)
           .join("\n");
-        return `Rasta kelios transporto priemonės pagal "${cmd.damageVehicle}":\n${list}\n\nPatikslinkite valstybinį numerį.`;
+        return `Rasta kelios transporto priemonės pagal "${cmd.damageVehicle}":\n${list}\n\nParašykite tikslų valstybinį numerį.`;
       }
 
       const vehicle = vehicles[0];
@@ -487,6 +499,39 @@ function getNewMessages(
   }));
 }
 
+// ─── Pending actions (conversation state) ────────────────────────────
+
+interface PendingDamage {
+  type: "damage_clarify_vehicle";
+  description: string;
+  urgency: "urgent" | "tolerable";
+  timestamp: number;
+}
+
+type PendingAction = PendingDamage;
+
+// Keyed by user phone/LID (the clean identifier from AllowedUser)
+const pendingActions = new Map<string, PendingAction>();
+const PENDING_TTL_MS = 5 * 60 * 1000; // 5 min expiry
+
+function setPending(userPhone: string, action: PendingAction): void {
+  pendingActions.set(userPhone, action);
+}
+
+function getPending(userPhone: string): PendingAction | null {
+  const action = pendingActions.get(userPhone);
+  if (!action) return null;
+  if (Date.now() - action.timestamp > PENDING_TTL_MS) {
+    pendingActions.delete(userPhone);
+    return null;
+  }
+  return action;
+}
+
+function clearPending(userPhone: string): void {
+  pendingActions.delete(userPhone);
+}
+
 // Track processed message IDs to avoid double-processing
 const processedMessages = new Set<string>();
 const MAX_PROCESSED_CACHE = 1000;
@@ -527,6 +572,39 @@ async function poll(): Promise<void> {
 
       // Parse command
       const cmd = parseCommand(msg.content);
+
+      // Check for pending action clarification
+      if (cmd.type === "unknown") {
+        const pending = getPending(user.phone);
+        if (pending && pending.type === "damage_clarify_vehicle") {
+          // Treat the raw message as the vehicle plate clarification
+          const plate = msg.content.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+          if (plate.length >= 3) {
+            clearPending(user.phone);
+            const clarifyCmd: ParsedCommand = {
+              type: "register_damage",
+              filters: [],
+              pageSize: 0,
+              damageVehicle: plate,
+              damageDescription: pending.description,
+              _userPhone: user.phone,
+            };
+            try {
+              const result = await executeCommand(clarifyCmd);
+              if (result) {
+                await sendWhatsApp(msg.chatJid, result);
+                console.log(`  → Clarification replied (${result.length} chars)`);
+              }
+            } catch (err) {
+              const errMsg = err instanceof Error ? err.message : String(err);
+              console.error(`  → Error: ${errMsg}`);
+              await sendWhatsApp(msg.chatJid, `❌ Klaida: ${errMsg}`);
+            }
+            continue;
+          }
+        }
+      }
+
       if (cmd.type === "unknown") {
         await sendWhatsApp(
           msg.chatJid,
@@ -546,6 +624,8 @@ async function poll(): Promise<void> {
 
       // Execute and reply
       try {
+        clearPending(user.phone); // new command clears any pending clarification
+        cmd._userPhone = user.phone;
         const result = await executeCommand(cmd);
         if (result) {
           await sendWhatsApp(msg.chatJid, result);
