@@ -104,9 +104,9 @@ interface ParsedCommand {
 function parseCommand(text: string): ParsedCommand {
   const lower = text.toLowerCase().trim();
 
-  // Register damage (e.g. "gedimas NBO401 kažkas sugedo", "užregistruok gedimą NBO401, skubus, broken mirror")
+  // Register damage (e.g. "gedimas NBO401 kažkas sugedo", "užregistruok gęsimą ABC007, SKUBUS, description")
   const damageMatch = lower.match(
-    /(?:u[zž]registru\w+\s+gedim\w*|gedim\w*|damage|registruoti\s+gedim\w*|prideti\s+gedim\w*|register\s+damage|add\s+damage)\s+([\w\d]+)[,;\s]\s*(.*)/i
+    /(?:u.?registru\S+\s+g\S*[sš]im\S*|g[eę][dž]im\S*|damage|registruoti\s+g\S*im\S*|prid[eė]ti\s+g\S*im\S*|register\s+damage|add\s+damage)\s+([\w\d]+)[,;\s]\s*(.*)/i
   );
   if (damageMatch) {
     const rawVehicle = damageMatch[1].replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
@@ -444,13 +444,19 @@ async function sendWhatsApp(recipient: string, message: string): Promise<void> {
 
 // ─── Database polling ────────────────────────────────────────────────
 
-let lastTimestamp: string | null = null;
+let lastTimestampMs: number = 0;
 let SQL: Awaited<ReturnType<typeof initSqlJs>> | null = null;
 
 async function openDb(): Promise<SqlJsDatabase> {
   if (!SQL) SQL = await initSqlJs();
   const buf = fs.readFileSync(DB_PATH);
   return new SQL.Database(buf);
+}
+
+/** Parse any timestamp string into epoch ms */
+function tsToMs(ts: string): number {
+  const d = new Date(ts);
+  return isNaN(d.getTime()) ? 0 : d.getTime();
 }
 
 interface MessageRow {
@@ -464,24 +470,14 @@ interface MessageRow {
 function getNewMessages(
   db: SqlJsDatabase
 ): Array<{ id: string; sender: string; content: string; chatJid: string; timestamp: string }> {
-  let stmt;
-  if (lastTimestamp) {
-    stmt = db.prepare(
-      `SELECT id, sender, content, chat_jid, timestamp
-       FROM messages
-       WHERE is_from_me = 0 AND content != '' AND timestamp > ?
-       ORDER BY timestamp ASC`
-    );
-    stmt.bind([lastTimestamp]);
-  } else {
-    stmt = db.prepare(
-      `SELECT id, sender, content, chat_jid, timestamp
-       FROM messages
-       WHERE is_from_me = 0 AND content != ''
-       ORDER BY timestamp DESC
-       LIMIT 1`
-    );
-  }
+  // Fetch all non-empty incoming messages, filter by epoch ms in JS
+  // to avoid SQLite string comparison issues with mixed timestamp formats
+  const stmt = db.prepare(
+    `SELECT id, sender, content, chat_jid, timestamp
+     FROM messages
+     WHERE is_from_me = 0 AND content != ''
+     ORDER BY timestamp ASC`
+  );
 
   const rows: MessageRow[] = [];
   while (stmt.step()) {
@@ -490,7 +486,21 @@ function getNewMessages(
   }
   stmt.free();
 
-  return rows.map((r) => ({
+  // If we have a watermark, filter to only newer messages
+  if (lastTimestampMs > 0) {
+    const filtered = rows.filter((r) => tsToMs(r.timestamp) > lastTimestampMs);
+    return filtered.map((r) => ({
+      id: r.id,
+      sender: r.sender,
+      content: r.content,
+      chatJid: r.chat_jid,
+      timestamp: r.timestamp,
+    }));
+  }
+
+  // First run: just return the last message to set watermark
+  const last = rows.length > 0 ? [rows[rows.length - 1]] : [];
+  return last.map((r) => ({
     id: r.id,
     sender: r.sender,
     content: r.content,
@@ -558,8 +568,9 @@ async function poll(): Promise<void> {
       }
 
       // Update watermark
-      if (!lastTimestamp || msg.timestamp > lastTimestamp) {
-        lastTimestamp = msg.timestamp;
+      const msgMs = tsToMs(msg.timestamp);
+      if (msgMs > lastTimestampMs) {
+        lastTimestampMs = msgMs;
       }
 
       // Check authorization
@@ -676,8 +687,8 @@ async function main(): Promise<void> {
   );
   if (stmt.step()) {
     const row = stmt.getAsObject() as unknown as { timestamp: string };
-    lastTimestamp = row.timestamp;
-    console.log(`  Starting from: ${lastTimestamp}`);
+    lastTimestampMs = tsToMs(row.timestamp);
+    console.log(`  Starting from: ${row.timestamp} (${lastTimestampMs})`);
   }
   stmt.free();
   db.close();
