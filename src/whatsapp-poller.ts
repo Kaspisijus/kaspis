@@ -90,11 +90,12 @@ const TASK_TYPES: Record<number, string> = {
 // ─── Command parsing & execution ─────────────────────────────────────
 
 interface ParsedCommand {
-  type: "find_carriages" | "carriages_by_vehicle" | "find_drivers" | "find_vehicles" | "unknown";
+  type: "find_carriages" | "carriages_by_vehicle" | "find_drivers" | "find_vehicles" | "search_vehicles" | "unknown";
   filters: Array<{ field: string; value: string | string[] | number[]; operator: string }>;
   quickFilter?: string[];
   pageSize: number;
   vehiclePlate?: string;
+  searchQuery?: string;
 }
 
 function parseCommand(text: string): ParsedCommand {
@@ -167,16 +168,13 @@ function parseCommand(text: string): ParsedCommand {
 
   // Find vehicles
   if (/vehicle|truck|auto|mašin|sunkvežim|vilkik/i.test(lower)) {
-    const plateMatch = lower.match(/([A-Z]{2,3}\s?\d{2,4})/i);
-    const filters: ParsedCommand["filters"] = [];
-    if (plateMatch) {
-      filters.push({
-        field: "driver",
-        value: plateMatch[1],
-        operator: "contains",
-      });
+    // Extract the query part after the vehicle keyword
+    const queryMatch = lower.match(/(?:vehicle|truck|auto|mašin\w*|sunkvežim\w*|vilkik\w*)\s+(.+)/i);
+    if (queryMatch) {
+      const query = queryMatch[1].trim().toUpperCase().replace(/\s/g, "");
+      return { type: "search_vehicles", filters: [], pageSize: 10, searchQuery: query };
     }
-    return { type: "find_vehicles", filters, pageSize: 10 };
+    return { type: "find_vehicles", filters: [], pageSize: 10 };
   }
 
   return { type: "unknown", filters: [], pageSize: 0 };
@@ -234,6 +232,21 @@ function formatVehicle(v: Record<string, unknown>): string {
   return `🚚 *${v.number}* ${v.brand ?? ""} ${v.model ?? ""} | ${status} | Odometer: ${v.odometer ?? "—"} km | Drivers: ${drivers?.join(", ") ?? "—"}`;
 }
 
+function formatVehicleDetailed(v: Record<string, unknown>): string {
+  const owner = v.owner as Record<string, unknown> | null;
+  const license = v.license as Record<string, unknown> | null;
+  let text = `🚚 *${v.name ?? v.number}*\n`;
+  if (v.vin) text += `VIN: ${v.vin}\n`;
+  if (v.odometer) text += `Odometer: ${v.odometer} km\n`;
+  if (owner?.name) text += `Owner: ${owner.name}\n`;
+  if (license?.name && license.name !== owner?.name) text += `License: ${license.name}\n`;
+  if (v.managerName) text += `Manager: ${v.managerName}\n`;
+  if (v.telemetrySource) text += `Telemetry: ${v.telemetrySource}\n`;
+  const tags = v.tags as Array<Record<string, unknown>> | undefined;
+  if (tags?.length) text += `Tags: ${tags.map((t) => t.label).join(", ")}\n`;
+  return text.trimEnd();
+}
+
 // ─── Execute command ─────────────────────────────────────────────────
 
 async function executeCommand(cmd: ParsedCommand): Promise<string> {
@@ -254,11 +267,10 @@ async function executeCommand(cmd: ParsedCommand): Promise<string> {
     }
 
     case "carriages_by_vehicle": {
-      // Step 1: find vehicle by plate number
-      const vData = (await client.findVehicles(
-        [{ field: "number", value: cmd.vehiclePlate!, operator: "contains" }],
-        0, 5
-      )) as { data: Record<string, unknown>[] };
+      // Step 1: search active vehicles by plate
+      const vData = (await client.searchActiveVehicles(cmd.vehiclePlate!)) as {
+        data: Record<string, unknown>[];
+      };
       const vehicles = vData.data ?? [];
       if (vehicles.length === 0) return `Vehicle ${cmd.vehiclePlate} not found.`;
       const vehicleIds = vehicles.map((v) => v.id as number);
@@ -298,6 +310,15 @@ async function executeCommand(cmd: ParsedCommand): Promise<string> {
       const vehicles = data.data ?? [];
       if (vehicles.length === 0) return "No vehicles found.";
       return vehicles.map(formatVehicle).join("\n");
+    }
+
+    case "search_vehicles": {
+      const sData = (await client.searchActiveVehicles(cmd.searchQuery!)) as {
+        data: Record<string, unknown>[];
+      };
+      const vehicles = sData.data ?? [];
+      if (vehicles.length === 0) return `Vehicle "${cmd.searchQuery}" not found.`;
+      return vehicles.map(formatVehicleDetailed).join("\n\n");
     }
 
     default:

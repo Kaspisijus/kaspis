@@ -203,4 +203,13 @@ export class BrunasApiClient {
     const response = await this.apiClient.get(`/api/v3/vehicles/${encodeURIComponent(id)}/form`);
     return response.data;
   }
+
+  async searchActiveVehicles(query: string): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.get(
+      `/api/v3/vehicles/search/active`,
+      { params: { query } }
+    );
+    return response.data;
+  }
 }

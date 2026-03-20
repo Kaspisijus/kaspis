@@ -188,6 +188,17 @@ const tools = [
       required: ["id"],
     },
   },
+  {
+    name: "search_vehicles",
+    description: "Search active vehicles by plate number or name query. Returns matching vehicles with id, number, name, vin, owner, manager, etc. Use this to find vehicle IDs for carriage filtering.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query (partial plate number or name, e.g. 'nb', 'LBK608')" },
+      },
+      required: ["query"],
+    },
+  },
 ];
 
 // ─── MCP Server ──────────────────────────────────────────────────────
@@ -280,6 +291,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidRequest, "id is required");
         }
         const data = await client.getVehicle(id);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      // ── Search active vehicles ────────────────────────────────
+      case "search_vehicles": {
+        const query = args.query as string;
+        if (!query) {
+          throw new McpError(ErrorCode.InvalidRequest, "query is required");
+        }
+        const data = await client.searchActiveVehicles(query);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
         };
