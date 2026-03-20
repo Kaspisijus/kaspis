@@ -9,6 +9,8 @@
     "start": "node dist/index.js",
     "dev": "tsc && node dist/index.js",
     "watch": "tsc --watch",
+    "start:brunas": "node dist/brunas-server.js",
+    "start:poller": "node dist/whatsapp-poller.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -25,11 +27,13 @@
     "axios": "^1.7.7",
     "dotenv": "^16.4.5",
     "express": "^5.2.1",
-    "playwright": "^1.59.0-alpha-1771104257000"
+    "playwright": "^1.59.0-alpha-1771104257000",
+    "sql.js": "^1.14.1"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^20.19.37",
+    "@types/sql.js": "^1.4.10",
     "typescript": "^5.3.3"
   }
 }

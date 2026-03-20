@@ -65,3 +65,37 @@ The project includes a custom MCP server that bridges Viber Bot API with AI agen
 - MCP Documentation: https://modelcontextprotocol.io/
 - TypeScript SDK: https://github.com/modelcontextprotocol/typescript-sdk
 - Viber Bot API: https://developers.viber.com/docs/api/rest-bot-api/
+
+---
+
+# WhatsApp + Brunas TMS Access Control
+
+When processing WhatsApp messages that request Brunas TMS data (carriages, drivers, vehicles), you MUST enforce the following allowlist. Only these phone numbers are authorized to query or modify Brunas TMS via WhatsApp:
+
+| Phone | Name |
+|-------|------|
+| +37067536696 | Mantas |
+| +37060889319 | Vilius |
+
+Rules:
+- Before executing any Brunas TMS tool (`find_carriages`, `find_drivers`, `find_vehicles`, `get_carriage`, `get_driver`, `get_vehicle`) in response to a WhatsApp message, verify the sender's phone number is in the allowlist above.
+- If the sender is NOT in the allowlist, reply via WhatsApp: "Atsiprašome, jūs neturite prieigos prie šios sistemos." (Sorry, you don't have access to this system.) Do NOT execute any TMS tool.
+- If the sender IS in the allowlist, proceed normally and address them by name.
+- This restriction applies only to Brunas TMS tools. Other WhatsApp interactions (general chat) are not restricted.
+
+---
+
+# Brunas TMS — Carriage Display Rules
+
+When displaying carriage data (from `find_carriages` or `get_carriage`), ALWAYS include the tasks (route) for each carriage. Task types: `5` = Loading, `0` = Unloading, `1` = Fuel, `2` = CarWash, `3` = Service.
+
+Format each carriage as:
+```
+Carriage #<prettyId> | <status> | <date> → <endDate>
+Vehicle: <vehicle.number> | Driver: <driverName> | Customer: <customer.name> | Price: <price> EUR
+
+Tasks:
+1. <name> (<type>) — <placeName>, <address>
+2. <name> (<type>) — <placeName>, <address>
+...
+```

@@ -28,6 +28,13 @@
 		"github": {
 			"type": "http",
 			"url": "https://api.githubcopilot.com/mcp/"
+		},
+		"brunas-tms": {
+			"command": "node",
+			"args": [
+				"dist/brunas-server.js"
+			],
+			"type": "stdio"
 		}
 	},
 	"inputs": []
