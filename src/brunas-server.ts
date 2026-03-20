@@ -217,6 +217,31 @@ Category values: body-work, engine, transmission, electrical, brakes, suspension
       required: ["vehicleId", "description"],
     },
   },
+  {
+    name: "upload_image",
+    description: `Upload an image file to Brunas TMS. Returns the upload ID and full URL path.
+The returned fullPath can be used to construct the photo URL: https://upload.brunas.lt/read/<fullPath>`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        filePath: { type: "string", description: "Absolute local path to the image file" },
+      },
+      required: ["filePath"],
+    },
+  },
+  {
+    name: "update_damage",
+    description: `Update an existing vehicle damage/failure record (e.g. to attach photos).
+Send the full record payload including photos array with URLs like: https://upload.brunas.lt/read/<fullPath>`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        damageId: { type: "string", description: "The UUID of the damage record to update" },
+        data: { type: "object", description: "Full or partial damage record payload (urgency, category, vehicleId, trailerId, description, status, photos)" },
+      },
+      required: ["damageId", "data"],
+    },
+  },
 ];
 
 // ─── MCP Server ──────────────────────────────────────────────────────
@@ -340,6 +365,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           category: (args.category as string) ?? "body-work",
           trailerId: (args.trailerId as number) ?? null,
         });
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "upload_image": {
+        const filePath = args.filePath as string;
+        if (!filePath) {
+          throw new McpError(ErrorCode.InvalidRequest, "filePath is required");
+        }
+        const data = await client.uploadImage(filePath);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "update_damage": {
+        const damageId = args.damageId as string;
+        const payload = args.data as Record<string, unknown>;
+        if (!damageId || !payload) {
+          throw new McpError(ErrorCode.InvalidRequest, "damageId and data are required");
+        }
+        const data = await client.updateVehicleDamage(damageId, payload);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
         };

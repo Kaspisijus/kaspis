@@ -99,6 +99,7 @@ interface ParsedCommand {
   damageVehicle?: string;
   damageDescription?: string;
   _userPhone?: string;
+  _chatJid?: string;
 }
 
 function parseCommand(text: string): ParsedCommand {
@@ -380,17 +381,85 @@ async function executeCommand(cmd: ParsedCommand): Promise<string> {
         .trim();
 
       // Step 2: register damage
-      await client.registerVehicleDamage({
+      const result = await client.registerVehicleDamage({
         vehicleId,
         description: desc,
         urgency,
       });
-      return `\u2705 Gedimas užregistruotas!\nVilkikas: ${vehicleNumber}\nAprašymas: ${desc}\nSkubumas: ${urgency === "urgent" ? "Skubus" : "Toleruojamas"}`;
+      const resData = result as { data?: { id?: string } };
+      const damageId = resData?.data?.id ?? "";
+
+      // Set pending state to await photos
+      if (cmd._userPhone && damageId) {
+        setPending(cmd._userPhone, {
+          type: "damage_await_photos",
+          damageId,
+          vehicleId,
+          vehicleNumber,
+          description: desc,
+          urgency: urgency as "urgent" | "tolerable",
+          category: "body-work",
+          photos: [],
+          chatJid: cmd._chatJid ?? "",
+          timestamp: Date.now(),
+        });
+      }
+
+      return `\u2705 Gedimas užregistruotas!\nVilkikas: ${vehicleNumber}\nAprašymas: ${desc}\nSkubumas: ${urgency === "urgent" ? "Skubus" : "Toleruojamas"}\n\nGalite siųsti nuotraukas — jos bus pridėtos prie šio gedimo.`;
     }
 
     default:
       return "";
   }
+}
+
+// ─── Photo download (bridge) + upload (Brunas) ───────────────────────
+
+async function downloadFromBridge(messageId: string, chatJid: string): Promise<string> {
+  const resp = await axios.post(`${WHATSAPP_API}/api/download`, {
+    message_id: messageId,
+    chat_jid: chatJid,
+  });
+  const data = resp.data as { success: boolean; path?: string; message?: string };
+  if (!data.success || !data.path) {
+    throw new Error(`Bridge download failed: ${data.message ?? "unknown"}`);
+  }
+  return data.path; // absolute local path
+}
+
+async function uploadAndAttachPhotos(
+  photoMessages: Array<{ id: string; chatJid: string }>,
+  damageId: string,
+  damageData: { vehicleId: number; description: string; urgency: string; category: string }
+): Promise<string[]> {
+  const client = getBrunas();
+  const photoUrls: string[] = [];
+
+  for (const pm of photoMessages) {
+    // Step 1: download from WhatsApp via bridge
+    const localPath = await downloadFromBridge(pm.id, pm.chatJid);
+
+    // Step 2: upload to Brunas
+    const uploadResult = (await client.uploadImage(localPath)) as {
+      data?: { fullPath?: string };
+    };
+    const fullPath = uploadResult?.data?.fullPath;
+    if (fullPath) {
+      photoUrls.push(`https://upload.brunas.lt/read/${fullPath}`);
+    }
+  }
+
+  // Step 3: update damage record with photo URLs
+  if (photoUrls.length > 0) {
+    await client.updateVehicleDamage(damageId, {
+      ...damageData,
+      trailerId: null,
+      status: "pending",
+      photos: photoUrls,
+    });
+  }
+
+  return photoUrls;
 }
 
 // ─── LID → phone resolver ────────────────────────────────────────────
@@ -465,17 +534,17 @@ interface MessageRow {
   content: string;
   chat_jid: string;
   timestamp: string;
+  media_type: string;
 }
 
 function getNewMessages(
   db: SqlJsDatabase
-): Array<{ id: string; sender: string; content: string; chatJid: string; timestamp: string }> {
-  // Fetch all non-empty incoming messages, filter by epoch ms in JS
-  // to avoid SQLite string comparison issues with mixed timestamp formats
+): Array<{ id: string; sender: string; content: string; chatJid: string; timestamp: string; mediaType: string }> {
+  // Fetch all incoming messages (text or media), filter by epoch ms in JS
   const stmt = db.prepare(
-    `SELECT id, sender, content, chat_jid, timestamp
+    `SELECT id, sender, content, chat_jid, timestamp, media_type
      FROM messages
-     WHERE is_from_me = 0 AND content != ''
+     WHERE is_from_me = 0 AND (content != '' OR media_type != '')
      ORDER BY timestamp ASC`
   );
 
@@ -486,27 +555,23 @@ function getNewMessages(
   }
   stmt.free();
 
+  const mapRow = (r: MessageRow) => ({
+    id: r.id,
+    sender: r.sender,
+    content: r.content ?? "",
+    chatJid: r.chat_jid,
+    timestamp: r.timestamp,
+    mediaType: r.media_type ?? "",
+  });
+
   // If we have a watermark, filter to only newer messages
   if (lastTimestampMs > 0) {
-    const filtered = rows.filter((r) => tsToMs(r.timestamp) > lastTimestampMs);
-    return filtered.map((r) => ({
-      id: r.id,
-      sender: r.sender,
-      content: r.content,
-      chatJid: r.chat_jid,
-      timestamp: r.timestamp,
-    }));
+    return rows.filter((r) => tsToMs(r.timestamp) > lastTimestampMs).map(mapRow);
   }
 
   // First run: just return the last message to set watermark
   const last = rows.length > 0 ? [rows[rows.length - 1]] : [];
-  return last.map((r) => ({
-    id: r.id,
-    sender: r.sender,
-    content: r.content,
-    chatJid: r.chat_jid,
-    timestamp: r.timestamp,
-  }));
+  return last.map(mapRow);
 }
 
 // ─── Pending actions (conversation state) ────────────────────────────
@@ -518,7 +583,33 @@ interface PendingDamage {
   timestamp: number;
 }
 
-type PendingAction = PendingDamage;
+interface PendingDamagePhotos {
+  type: "damage_await_photos";
+  damageId: string;
+  vehicleId: number;
+  vehicleNumber: string;
+  description: string;
+  urgency: "urgent" | "tolerable";
+  category: string;
+  photos: string[]; // collected message IDs
+  chatJid: string;
+  timestamp: number;
+}
+
+interface PendingDamageConfirm {
+  type: "damage_confirm_photos";
+  damageId: string;
+  vehicleId: number;
+  vehicleNumber: string;
+  description: string;
+  urgency: "urgent" | "tolerable";
+  category: string;
+  photoMessageIds: Array<{ id: string; chatJid: string }>;
+  chatJid: string;
+  timestamp: number;
+}
+
+type PendingAction = PendingDamage | PendingDamagePhotos | PendingDamageConfirm;
 
 // Keyed by user phone/LID (the clean identifier from AllowedUser)
 const pendingActions = new Map<string, PendingAction>();
@@ -578,8 +669,90 @@ async function poll(): Promise<void> {
       if (!user) continue; // silently ignore unauthorized users
 
       console.log(
-        `[${new Date().toISOString()}] ${user.name}: ${msg.content.substring(0, 80)}`
+        `[${new Date().toISOString()}] ${user.name}: ${msg.mediaType ? `[${msg.mediaType}] ` : ""}${msg.content.substring(0, 80)}`
       );
+
+      // ─── Handle image messages (photo flow) ───────────────────
+      if (msg.mediaType === "image") {
+        const pending = getPending(user.phone);
+        if (pending && pending.type === "damage_await_photos") {
+          // First photo after damage registration — collect and ask for more or confirm
+          const photoList: Array<{ id: string; chatJid: string }> = [{ id: msg.id, chatJid: msg.chatJid }];
+          setPending(user.phone, {
+            type: "damage_confirm_photos",
+            damageId: pending.damageId,
+            vehicleId: pending.vehicleId,
+            vehicleNumber: pending.vehicleNumber,
+            description: pending.description,
+            urgency: pending.urgency,
+            category: pending.category,
+            photoMessageIds: photoList,
+            chatJid: msg.chatJid,
+            timestamp: Date.now(),
+          });
+          await sendWhatsApp(
+            msg.chatJid,
+            `📷 Gauta 1 nuotrauka.\nSiųskite daugiau arba rašykite *Taip* — pridėti prie gedimo (${pending.vehicleNumber}).`
+          );
+          console.log(`  → Photo collected (1), awaiting confirm`);
+          continue;
+        }
+        if (pending && pending.type === "damage_confirm_photos") {
+          // Additional photo — add to collection
+          pending.photoMessageIds.push({ id: msg.id, chatJid: msg.chatJid });
+          pending.timestamp = Date.now(); // refresh TTL
+          await sendWhatsApp(
+            msg.chatJid,
+            `📷 Gauta ${pending.photoMessageIds.length} nuotrauk${pending.photoMessageIds.length === 1 ? "a" : "os"}.\nSiųskite daugiau arba rašykite *Taip* — pridėti prie gedimo (${pending.vehicleNumber}).`
+          );
+          console.log(`  → Photo collected (${pending.photoMessageIds.length}), awaiting confirm`);
+          continue;
+        }
+        // Image but no pending damage — ignore silently
+        console.log(`  → Image message, no pending damage — skipped`);
+        continue;
+      }
+
+      // ─── Handle confirmation for pending photos ────────────────
+      const pendingCheck = getPending(user.phone);
+      if (pendingCheck && pendingCheck.type === "damage_confirm_photos") {
+        const lower = msg.content.toLowerCase().trim();
+        if (/^(taip|yes|jo|t|y|ok|gerai|pridek|pridėk|prisek|prisekit)$/i.test(lower)) {
+          // User confirmed — process upload
+          clearPending(user.phone);
+          try {
+            await sendWhatsApp(msg.chatJid, `⏳ Įkeliamos ${pendingCheck.photoMessageIds.length} nuotrauk${pendingCheck.photoMessageIds.length === 1 ? "a" : "os"}...`);
+            const urls = await uploadAndAttachPhotos(
+              pendingCheck.photoMessageIds,
+              pendingCheck.damageId,
+              {
+                vehicleId: pendingCheck.vehicleId,
+                description: pendingCheck.description,
+                urgency: pendingCheck.urgency,
+                category: pendingCheck.category,
+              }
+            );
+            await sendWhatsApp(
+              msg.chatJid,
+              `✅ ${urls.length} nuotrauk${urls.length === 1 ? "a pridėta" : "os pridėtos"} prie gedimo (${pendingCheck.vehicleNumber}).`
+            );
+            console.log(`  → ${urls.length} photos uploaded and attached to damage ${pendingCheck.damageId}`);
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            console.error(`  → Photo upload error: ${errMsg}`);
+            await sendWhatsApp(msg.chatJid, `❌ Klaida įkeliant nuotraukas: ${errMsg}`);
+          }
+          continue;
+        }
+        if (/^(ne|no|n|atšauk|atsaukti|cancel)$/i.test(lower)) {
+          clearPending(user.phone);
+          await sendWhatsApp(msg.chatJid, `Nuotraukos nebus pridėtos.`);
+          console.log(`  → Photo attachment cancelled`);
+          continue;
+        }
+        // Any other text while photos pending — clear pending and process normally
+        clearPending(user.phone);
+      }
 
       // Parse command
       const cmd = parseCommand(msg.content);
@@ -599,6 +772,7 @@ async function poll(): Promise<void> {
               damageVehicle: plate,
               damageDescription: pending.description,
               _userPhone: user.phone,
+              _chatJid: msg.chatJid,
             };
             try {
               const result = await executeCommand(clarifyCmd);
@@ -637,6 +811,7 @@ async function poll(): Promise<void> {
       try {
         clearPending(user.phone); // new command clears any pending clarification
         cmd._userPhone = user.phone;
+        cmd._chatJid = msg.chatJid;
         const result = await executeCommand(cmd);
         if (result) {
           await sendWhatsApp(msg.chatJid, result);

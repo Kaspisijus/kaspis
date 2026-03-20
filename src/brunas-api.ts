@@ -1,4 +1,7 @@
 import axios, { AxiosInstance, AxiosError } from "axios";
+import fs from "fs";
+import path from "path";
+import FormData from "form-data";
 
 interface FilterItem {
   field: string;
@@ -235,6 +238,31 @@ export class BrunasApiClient {
         photos: [],
       }
     );
+    return response.data;
+  }
+
+  async updateVehicleDamage(
+    damageId: string,
+    data: Record<string, unknown>
+  ): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.put(
+      `/api/v2/vehicle-failures/${encodeURIComponent(damageId)}`,
+      data
+    );
+    return response.data;
+  }
+
+  async uploadImage(filePath: string): Promise<unknown> {
+    await this.ensureAuth();
+    const form = new FormData();
+    form.append("image", fs.createReadStream(filePath), path.basename(filePath));
+    const response = await this.apiClient.post("/upload/upload", form, {
+      headers: {
+        ...form.getHeaders(),
+        Cookie: `jwt=${this.jwt}`,
+      },
+    });
     return response.data;
   }
 }
