@@ -74,7 +74,15 @@ const ALLOWED_USERS = parseAllowedUsers(
 function isAuthorized(sender: string): AllowedUser | null {
   // sender in DB can be LID (e.g. "86719735005297") or phone (e.g. "37067536696")
   const clean = sender.replace("+", "").replace("@s.whatsapp.net", "").replace("@lid", "");
-  return ALLOWED_USERS.find((u) => u.phone === clean) ?? null;
+  // Direct match on LID
+  const direct = ALLOWED_USERS.find((u) => u.phone === clean);
+  if (direct) return direct;
+  // Reverse lookup: sender might be a phone number — resolve LID→phone and match
+  for (const u of ALLOWED_USERS) {
+    const phone = resolveLidToPhone(u.phone);
+    if (phone && phone === clean) return u;
+  }
+  return null;
 }
 
 // ─── Brunas client (lazy) ────────────────────────────────────────────
