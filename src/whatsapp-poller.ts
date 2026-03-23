@@ -635,6 +635,13 @@ interface PendingDamage {
   timestamp: number;
 }
 
+interface PendingDamageDescription {
+  type: "damage_await_description";
+  vehiclePlate: string;
+  urgency: "urgent" | "tolerable";
+  timestamp: number;
+}
+
 interface PendingDamagePhotos {
   type: "damage_await_photos";
   damageId: string;
@@ -661,7 +668,7 @@ interface PendingDamageConfirm {
   timestamp: number;
 }
 
-type PendingAction = PendingDamage | PendingDamagePhotos | PendingDamageConfirm;
+type PendingAction = PendingDamage | PendingDamageDescription | PendingDamagePhotos | PendingDamageConfirm;
 
 // Keyed by user phone/LID (the clean identifier from AllowedUser)
 const pendingActions = new Map<string, PendingAction>();
@@ -745,14 +752,28 @@ function updateDamagePhotoCount(userPhone: string, damageId: string, count: numb
 
 // ─── LLM-powered smart routing ──────────────────────────────────────
 
+interface LLMStepCommand {
+  tool: "find_carriages" | "carriages_by_vehicle" | "find_drivers" | "find_vehicles" | "search_vehicles" | "register_damage";
+  pageSize?: number;
+  vehiclePlate?: string;
+  searchQuery?: string;
+  filters?: Array<{ field: string; value: string | string[] | number[]; operator: string }>;
+  quickFilter?: string[];
+  damageVehicle?: string;
+  damageDescription?: string;
+  urgency?: string;
+  useVehicleFromPrevious?: boolean;
+}
+
 interface LLMDecision {
-  action: "attach_photos" | "register_damage" | "reply" | "command";
+  action: "attach_photos" | "register_damage" | "reply" | "command" | "multi_step";
   damageId?: string;
   vehicleNumber?: string;
   description?: string;
   urgency?: string;
   text?: string;
   rawCommand?: string;
+  steps?: LLMStepCommand[];
 }
 
 const LLM_SYSTEM_PROMPT = `Tu esi transporto įmonės asistentas WhatsApp žinutėse. Kalbi lietuviškai.
@@ -761,22 +782,49 @@ Tavo darbas — suprasti vartotojo žinutę ir nuspręsti, kokį veiksmą atlikt
 Galimi veiksmai (atsakyk JSON formatu):
 
 1. {"action": "attach_photos", "damageId": "<id>", "vehicleNumber": "<nr>"}
-   — Kai vartotojas siunčia nuotrauką/vaizdo įrašą ir yra neseniai registruotas gedimas, kuriam galima pridėti
+   — Kai vartotojas siunčia nuotrauką/vaizdo įrašą ir yra neseniai registruotas gedimas
 
 2. {"action": "register_damage", "vehicleNumber": "<nr>", "description": "<aprašymas>", "urgency": "tolerable|urgent"}
-   — Kai vartotojas nori registruoti naują gedimą
+   — Kai vartotojas nori registruoti naują gedimą nurodydamas vilkiką
 
-3. {"action": "command", "rawCommand": "<originali žinutė>"}
-   — Kai vartotojas klausia apie reisus, vilkikus, vairuotojus (pvz: "reisas 5268", "vilkikas nbo401", "vairuotojai")
+3. {"action": "command", "rawCommand": "<komanda>"}
+   — Paprastos komandos: "reisas 5268", "vilkikas NBO401", "reisai LBK608", "vairuotojai"
+   — rawCommand turi būti viena aiški komanda, kurią regex parseris gali suprasti
 
-4. {"action": "reply", "text": "<atsakymas>"}
+4. {"action": "multi_step", "steps": [...]}
+   — Kelių žingsnių užduotys, kai vieno veiksmo nepakanka.
+   — Kiekvienas žingsnis turi "tool" ir parametrus.
+   — Jei žingsnis priklauso nuo prieš tai buvusio rezultato, pridėk "useVehicleFromPrevious": true
+
+   Galimi tool tipai:
+   - "find_carriages": ieškoti reisų. Parametrai: pageSize (kiek), filters (filtrai)
+   - "carriages_by_vehicle": reisai pagal vilkiką. Parametrai: vehiclePlate, pageSize
+   - "find_drivers": ieškoti vairuotojų. Parametrai: pageSize, quickFilter
+   - "find_vehicles": ieškoti vilkikų. Parametrai: pageSize, quickFilter
+   - "search_vehicles": ieškoti vilkiko. Parametrai: searchQuery
+   - "register_damage": registruoti gedimą. Parametrai: damageVehicle, damageDescription, urgency
+
+   Pvz: "surask paskutinį reisą ir užregistruok gedimą" →
+   {"action": "multi_step", "steps": [
+     {"tool": "find_carriages", "pageSize": 1},
+     {"tool": "register_damage", "useVehicleFromPrevious": true, "damageDescription": ""}
+   ]}
+
+   Pvz: "koks vilkikas veža reisą 5268?" →
+   {"action": "command", "rawCommand": "reisas 5268"}
+
+5. {"action": "reply", "text": "<atsakymas>"}
    — Kai reikia paklausti patikslinimo arba atsakyti į bendrą klausimą
+   — Naudok kai trūksta info (pvz gedimo aprašymo), arba bendram pokalbiui
 
 TAISYKLĖS:
-- Jei vartotojas siunčia nuotrauką/video ir per paskutinę valandą buvo registruotas gedimas — VISADA paklausk ar pridėti prie to gedimo (action: "reply" su klausimu lietuviškai)
+- "paskutinį reisą" / "naujausią reisą" = pageSize: 1
+- "paskutinius 3 reisus" = pageSize: 3
+- Jei vartotojas prašo kelių veiksmų vienu sakiniu (pvz "surask X ir padaryk Y") — VISADA naudok "multi_step"
+- Jei register_damage žingsnyje nėra konkretaus vilkiko numerio, bet prieš tai buvo find_carriages — naudok "useVehicleFromPrevious": true
+- Jei gedimo aprašymas nenurodtas, palik damageDescription tuščią — sistema paklaus vartotojo
+- Jei vartotojas siunčia nuotrauką/video ir per paskutinę valandą buvo registruotas gedimas — paklausk ar pridėti (action: "reply")
 - Jei yra keli neseniai registruoti gedimai — paklausk, prie kurio pridėti
-- Jei vartotojas aiškiai patvirtina pridėti prie konkretaus gedimo — naudok "attach_photos" su tuo damageId
-- Jei žinutė aiškiai yra komanda (reisas, vilkikas, gedimas, vairuotojai) — naudok "command"
 - Niekada nesugalvok damageId — naudok tik iš pateikto konteksto
 - Atsakyk TIKTAI JSON formatu, be jokio papildomo teksto`;
 
@@ -822,7 +870,7 @@ async function askLLM(
       model: LLM_MODEL,
       messages,
       temperature: 0.1,
-      max_tokens: 300,
+      max_tokens: 600,
     });
 
     const raw = response.choices[0]?.message?.content?.trim() ?? "";
@@ -836,6 +884,103 @@ async function askLLM(
     console.error(`    [LLM] Error: ${err instanceof Error ? err.message : err}`);
     return null;
   }
+}
+
+// ─── Multi-step executor ─────────────────────────────────────────────
+
+interface StepContext {
+  lastVehiclePlate?: string;
+  lastVehicleId?: number;
+  lastCarriage?: Record<string, unknown>;
+  results: string[];
+}
+
+async function executeMultiStep(
+  steps: LLMStepCommand[],
+  userPhone: string,
+  chatJid: string,
+): Promise<string> {
+  const ctx: StepContext = { results: [] };
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    console.log(`    [multi-step] Step ${i + 1}/${steps.length}: ${step.tool}`);
+
+    // Resolve vehicle from previous step if needed
+    if (step.useVehicleFromPrevious && ctx.lastVehiclePlate) {
+      if (step.tool === "register_damage") {
+        step.damageVehicle = ctx.lastVehiclePlate;
+      } else if (step.tool === "carriages_by_vehicle") {
+        step.vehiclePlate = ctx.lastVehiclePlate;
+      } else if (step.tool === "search_vehicles") {
+        step.searchQuery = ctx.lastVehiclePlate;
+      }
+    }
+
+    // Pre-check: if register_damage has no description, ask user before calling API
+    if (step.tool === "register_damage" && !step.damageDescription && ctx.lastVehiclePlate) {
+      setPending(userPhone, {
+        type: "damage_await_description" as const,
+        vehiclePlate: step.damageVehicle ?? ctx.lastVehiclePlate,
+        urgency: (step.urgency ?? "tolerable") as "urgent" | "tolerable",
+        timestamp: Date.now(),
+      });
+      ctx.results.push(
+        `🚛 Paskutinio reiso vilkikas: *${ctx.lastVehiclePlate}*\n` +
+        `Įveskite gedimo aprašymą, kad užregistruotume gedimą šiam vilkikui.`
+      );
+      break;
+    }
+
+    // Build a ParsedCommand from the step
+    const cmd: ParsedCommand = {
+      type: step.tool,
+      filters: step.filters ?? [],
+      pageSize: step.pageSize ?? 5,
+      quickFilter: step.quickFilter,
+      vehiclePlate: step.vehiclePlate,
+      searchQuery: step.searchQuery,
+      damageVehicle: step.damageVehicle,
+      damageDescription: step.damageDescription ?? "",
+      _userPhone: userPhone,
+      _chatJid: chatJid,
+    };
+
+    try {
+      const result = await executeCommand(cmd);
+
+      // Extract vehicle info from carriage results for chaining
+      if ((step.tool === "find_carriages" || step.tool === "carriages_by_vehicle") && result) {
+        // Re-fetch to get structured data for context passing
+        const client = getBrunas();
+        const data = (await client.findCarriages(
+          cmd.filters,
+          0,
+          cmd.pageSize,
+          [{ field: "date", sort: "desc" }],
+          cmd.quickFilter,
+        )) as { data: Record<string, unknown>[] };
+        const carriages = data.data ?? [];
+        if (carriages.length > 0) {
+          ctx.lastCarriage = carriages[0];
+          const vehicle = carriages[0].vehicle as Record<string, unknown> | undefined;
+          if (vehicle?.number) {
+            ctx.lastVehiclePlate = vehicle.number as string;
+            ctx.lastVehicleId = vehicle.id as number;
+          }
+        }
+      }
+
+      if (result) ctx.results.push(result);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      ctx.results.push(`❌ Žingsnis ${i + 1} klaida: ${errMsg}`);
+      console.error(`    [multi-step] Step ${i + 1} error: ${errMsg}`);
+      break; // stop chain on error
+    }
+  }
+
+  return ctx.results.join("\n\n");
 }
 
 // Track processed message IDs to avoid double-processing
@@ -991,49 +1136,97 @@ async function poll(): Promise<void> {
         clearPending(user.phone);
       }
 
-      // Parse command
-      const cmd = parseCommand(msg.content);
-
-      // Check for pending action clarification
-      if (cmd.type === "unknown") {
-        const pending = getPending(user.phone);
-        if (pending && pending.type === "damage_clarify_vehicle") {
-          // Treat the raw message as the vehicle plate clarification
-          const plate = msg.content.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
-          if (plate.length >= 3) {
-            clearPending(user.phone);
-            const clarifyCmd: ParsedCommand = {
-              type: "register_damage",
-              filters: [],
-              pageSize: 0,
-              damageVehicle: plate,
-              damageDescription: pending.description,
-              _userPhone: user.phone,
-              _chatJid: msg.chatJid,
-            };
-            try {
-              const result = await executeCommand(clarifyCmd);
-              if (result) {
-                await sendWhatsApp(msg.chatJid, result);
-                console.log(`  → Clarification replied (${result.length} chars)`);
-              }
-            } catch (err) {
-              const errMsg = err instanceof Error ? err.message : String(err);
-              console.error(`  → Error: ${errMsg}`);
-              await sendWhatsApp(msg.chatJid, `❌ Klaida: ${errMsg}`);
+      // ─── Handle pending damage clarification (user provides plate) ──
+      const pendingDmg = getPending(user.phone);
+      if (pendingDmg && pendingDmg.type === "damage_clarify_vehicle") {
+        // Treat the raw message as plate or description clarification
+        const plate = msg.content.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+        if (plate.length >= 3) {
+          clearPending(user.phone);
+          const clarifyCmd: ParsedCommand = {
+            type: "register_damage",
+            filters: [],
+            pageSize: 0,
+            damageVehicle: plate,
+            damageDescription: pendingDmg.description,
+            _userPhone: user.phone,
+            _chatJid: msg.chatJid,
+          };
+          try {
+            const result = await executeCommand(clarifyCmd);
+            if (result) {
+              await sendWhatsApp(msg.chatJid, result);
+              addToHistory(user.phone, "assistant", result);
+              console.log(`  → Clarification replied (${result.length} chars)`);
             }
-            continue;
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            console.error(`  → Error: ${errMsg}`);
+            await sendWhatsApp(msg.chatJid, `❌ Klaida: ${errMsg}`);
           }
+          continue;
         }
       }
 
-      if (cmd.type === "unknown") {
-        // Try LLM before falling back to help
-        addToHistory(user.phone, "user", msg.content);
-        const decision = await askLLM(user.phone, user.name, msg.content, "");
+      // ─── Handle pending damage description (vehicle known, need description) ──
+      if (pendingDmg && pendingDmg.type === "damage_await_description") {
+        const description = msg.content.trim();
+        if (description.length >= 2) {
+          clearPending(user.phone);
+          const dmgCmd: ParsedCommand = {
+            type: "register_damage",
+            filters: [],
+            pageSize: 0,
+            damageVehicle: pendingDmg.vehiclePlate,
+            damageDescription: description,
+            _userPhone: user.phone,
+            _chatJid: msg.chatJid,
+          };
+          try {
+            const result = await executeCommand(dmgCmd);
+            if (result) {
+              await sendWhatsApp(msg.chatJid, result);
+              addToHistory(user.phone, "assistant", result);
+              console.log(`  → Damage registered with description (${result.length} chars)`);
+            }
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            console.error(`  → Error: ${errMsg}`);
+            await sendWhatsApp(msg.chatJid, `❌ Klaida: ${errMsg}`);
+          }
+          continue;
+        }
+      }
 
-        if (decision?.action === "register_damage" && decision.vehicleNumber) {
-          const clarifyCmd: ParsedCommand = {
+      // ─── LLM-first routing ─────────────────────────────────────
+      addToHistory(user.phone, "user", msg.content);
+      console.log(`  → Asking LLM...`);
+      const decision = await askLLM(user.phone, user.name, msg.content, "");
+
+      if (decision) {
+        console.log(`  → LLM action: ${decision.action}`);
+
+        // ── multi_step ──
+        if (decision.action === "multi_step" && decision.steps?.length) {
+          try {
+            clearPending(user.phone);
+            const result = await executeMultiStep(decision.steps, user.phone, msg.chatJid);
+            if (result) {
+              await sendWhatsApp(msg.chatJid, result);
+              addToHistory(user.phone, "assistant", result);
+              console.log(`  → multi_step replied (${result.length} chars)`);
+            }
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await sendWhatsApp(msg.chatJid, `❌ Klaida: ${errMsg}`);
+          }
+          continue;
+        }
+
+        // ── register_damage ──
+        if (decision.action === "register_damage" && decision.vehicleNumber) {
+          clearPending(user.phone);
+          const dmgCmd: ParsedCommand = {
             type: "register_damage",
             filters: [],
             pageSize: 0,
@@ -1043,7 +1236,7 @@ async function poll(): Promise<void> {
             _chatJid: msg.chatJid,
           };
           try {
-            const result = await executeCommand(clarifyCmd);
+            const result = await executeCommand(dmgCmd);
             if (result) {
               await sendWhatsApp(msg.chatJid, result);
               addToHistory(user.phone, "assistant", result);
@@ -1056,9 +1249,11 @@ async function poll(): Promise<void> {
           continue;
         }
 
-        if (decision?.action === "command" && decision.rawCommand) {
+        // ── command (simple) ──
+        if (decision.action === "command" && decision.rawCommand) {
           const retryCmd = parseCommand(decision.rawCommand);
           if (retryCmd.type !== "unknown") {
+            clearPending(user.phone);
             retryCmd._userPhone = user.phone;
             retryCmd._chatJid = msg.chatJid;
             try {
@@ -1076,51 +1271,51 @@ async function poll(): Promise<void> {
           }
         }
 
-        if (decision?.action === "reply" && decision.text) {
+        // ── reply ──
+        if (decision.action === "reply" && decision.text) {
           await sendWhatsApp(msg.chatJid, decision.text);
           addToHistory(user.phone, "assistant", decision.text);
           console.log(`  → LLM replied (${decision.text.length} chars)`);
           continue;
         }
+      }
 
-        // Final fallback — help message
-        const helpMsg =
-          `Sveiki, ${user.name}! Nesupratau užklausos.\n\n` +
-          `Galimos komandos:\n` +
-          `• *Reisas <nr>* — gauti reiso informaciją\n` +
-          `• *Reisai* — paskutinių reisų sąrašas\n` +
-          `• *Reisai <valst. nr>* — reisai pagal vilkiką\n` +
-          `• *Vilkikas <valst. nr>* — vilkiko informacija\n` +
-          `• *Vairuotojai* — vairuotojų sąrašas\n` +
-          `• *Gedimas <valst. nr> <aprašymas>* — registruoti gedimą\n\n` +
-          `Pavyzdžiai: "Reisas 5268", "Reisai LBK608", "Gedimas NBO401 sugedo veidrodis"`;
-        await sendWhatsApp(msg.chatJid, helpMsg);
-        addToHistory(user.phone, "assistant", helpMsg);
-        console.log(`  → Unknown command, LLM no decision, sent help`);
+      // ─── Fallback: regex parser ────────────────────────────────
+      console.log(`  → LLM no decision, trying regex...`);
+      const cmd = parseCommand(msg.content);
+      if (cmd.type !== "unknown") {
+        clearPending(user.phone);
+        cmd._userPhone = user.phone;
+        cmd._chatJid = msg.chatJid;
+        try {
+          const result = await executeCommand(cmd);
+          if (result) {
+            await sendWhatsApp(msg.chatJid, result);
+            addToHistory(user.phone, "assistant", result);
+            console.log(`  → Regex replied (${result.length} chars)`);
+          }
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.error(`  → Error: ${errMsg}`);
+          await sendWhatsApp(msg.chatJid, `❌ Klaida: ${errMsg}`);
+        }
         continue;
       }
 
-      // Execute and reply
-      try {
-        clearPending(user.phone); // new command clears any pending clarification
-        cmd._userPhone = user.phone;
-        cmd._chatJid = msg.chatJid;
-        addToHistory(user.phone, "user", msg.content);
-        const result = await executeCommand(cmd);
-        if (result) {
-          await sendWhatsApp(msg.chatJid, result);
-          addToHistory(user.phone, "assistant", result);
-          console.log(`  → Replied (${result.length} chars)`);
-        }
-      } catch (err) {
-        const errMsg =
-          err instanceof Error ? err.message : String(err);
-        console.error(`  → Error: ${errMsg}`);
-        await sendWhatsApp(
-          msg.chatJid,
-          `❌ Klaida apdorojant užklausą: ${errMsg}`
-        );
-      }
+      // ─── Final fallback: help message ──────────────────────────
+      const helpMsg =
+        `Sveiki, ${user.name}! Nesupratau užklausos.\n\n` +
+        `Galimos komandos:\n` +
+        `• *Reisas <nr>* — gauti reiso informaciją\n` +
+        `• *Reisai* — paskutinių reisų sąrašas\n` +
+        `• *Reisai <valst. nr>* — reisai pagal vilkiką\n` +
+        `• *Vilkikas <valst. nr>* — vilkiko informacija\n` +
+        `• *Vairuotojai* — vairuotojų sąrašas\n` +
+        `• *Gedimas <valst. nr> <aprašymas>* — registruoti gedimą\n\n` +
+        `Pavyzdžiai: "Reisas 5268", "Reisai LBK608", "Gedimas NBO401 sugedo veidrodis"`;
+      await sendWhatsApp(msg.chatJid, helpMsg);
+      addToHistory(user.phone, "assistant", helpMsg);
+      console.log(`  → Sent help message`);
     }
   } catch (err) {
     if (db) db.close();
