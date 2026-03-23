@@ -766,7 +766,7 @@ interface LLMStepCommand {
 }
 
 interface LLMDecision {
-  action: "attach_photos" | "register_damage" | "reply" | "command" | "multi_step";
+  action: "attach_photos" | "register_damage" | "reply" | "command" | "multi_step" | "find_carriages" | "carriages_by_vehicle" | "find_drivers" | "find_vehicles" | "search_vehicles";
   damageId?: string;
   vehicleNumber?: string;
   description?: string;
@@ -1276,6 +1276,35 @@ async function poll(): Promise<void> {
           await sendWhatsApp(msg.chatJid, decision.text);
           addToHistory(user.phone, "assistant", decision.text);
           console.log(`  → LLM replied (${decision.text.length} chars)`);
+          continue;
+        }
+
+        // ── LLM returned a tool name directly as action (e.g. "find_carriages") ──
+        const toolActions = ["find_carriages", "carriages_by_vehicle", "find_drivers", "find_vehicles", "search_vehicles"];
+        if (toolActions.includes(decision.action)) {
+          const raw = decision as unknown as Record<string, unknown>;
+          try {
+            clearPending(user.phone);
+            const result = await executeMultiStep(
+              [{
+                tool: decision.action as LLMStepCommand["tool"],
+                pageSize: raw.pageSize as number | undefined,
+                vehiclePlate: raw.vehiclePlate as string | undefined,
+                searchQuery: raw.searchQuery as string | undefined,
+                quickFilter: raw.quickFilter as string[] | undefined,
+              }],
+              user.phone,
+              msg.chatJid,
+            );
+            if (result) {
+              await sendWhatsApp(msg.chatJid, result);
+              addToHistory(user.phone, "assistant", result);
+              console.log(`  → LLM→direct tool (${result.length} chars)`);
+            }
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await sendWhatsApp(msg.chatJid, `❌ Klaida: ${errMsg}`);
+          }
           continue;
         }
       }
