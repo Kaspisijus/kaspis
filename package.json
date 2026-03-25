@@ -10,6 +10,7 @@
     "dev": "tsc && node dist/index.js",
     "watch": "tsc --watch",
     "start:brunas": "node dist/brunas-server.js",
+    "start:bss": "node dist/bss-server.js",
     "start:poller": "node dist/whatsapp-poller.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

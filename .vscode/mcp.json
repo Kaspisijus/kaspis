@@ -35,6 +35,16 @@
 				"dist/brunas-server.js"
 			],
 			"type": "stdio"
+		},
+		"bss-accounting": {
+			"command": "node",
+			"args": [
+				"dist/bss-server.js"
+			],
+			"type": "stdio",
+			"env": {
+				"NODE_TLS_REJECT_UNAUTHORIZED": "0"
+			}
 		}
 	},
 	"inputs": []
