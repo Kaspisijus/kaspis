@@ -216,6 +216,98 @@ export class BrunasApiClient {
     return response.data;
   }
 
+  async searchSuperStructureMakes(query: string): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.get(
+      `/api/v2/super-structure/models/search`,
+      { params: { query } }
+    );
+    return response.data;
+  }
+
+  async createSuperStructureMake(make: string): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.post(
+      `/api/v2/super-structure/models`,
+      { model: make }
+    );
+    return response.data;
+  }
+
+  async searchSuperStructureModels(query: string): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.get(
+      `/api/v2/super-structure/types/search`,
+      { params: { query } }
+    );
+    return response.data;
+  }
+
+  async createSuperStructureModel(type: string): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.post(
+      `/api/v2/super-structure/types`,
+      { type }
+    );
+    return response.data;
+  }
+
+  async createTrailer(data: Record<string, unknown>): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.post(
+      `/api/v3/trailers/`,
+      data
+    );
+    return response.data;
+  }
+
+  async findTrailers(
+    filters: FilterItem[] = [],
+    page = 0,
+    pageSize = 25,
+    sort?: SortItem[]
+  ): Promise<unknown> {
+    await this.ensureAuth();
+    const body = {
+      paginationModel: { page, pageSize },
+      filterModel: {
+        items: filters.map((f) => ({
+          strictNulls: null,
+          id: undefined,
+          field: f.field,
+          operator: f.operator,
+          value: f.value,
+        })),
+        logicOperator: "and",
+        quickFilterLogicOperator: null,
+        quickFilterValues: null,
+      },
+      sortModel: sort ?? [],
+    };
+    const response = await this.apiClient.post(
+      `/api/v3/trailers/datatable/list`,
+      body
+    );
+    return response.data;
+  }
+
+  async getTrailer(id: number): Promise<Record<string, unknown>> {
+    await this.ensureAuth();
+    const response = await this.apiClient.get(
+      `/api/v3/trailers/${encodeURIComponent(id)}`
+    );
+    return response.data;
+  }
+
+  async updateTrailer(id: number, data: Record<string, unknown>): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.put(
+      `/api/v3/trailers/${encodeURIComponent(id)}`,
+      data
+    );
+    return response.data;
+  }
+
   // ─── Vehicle Service ──────────────────────────────────────
 
   async registerVehicleDamage(opts: {
