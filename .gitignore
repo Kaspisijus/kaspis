@@ -2,4 +2,3 @@ node_modules/
 .playwright-mcp/
 dist/
 .env
-whatsapp-mcp/

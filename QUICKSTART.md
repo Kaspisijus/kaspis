@@ -24,6 +24,7 @@ WEBHOOK_PORT=3001
 
 ```bash
 npm install
+git submodule update --init --recursive
 ```
 
 Project already includes:

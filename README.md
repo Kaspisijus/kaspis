@@ -32,7 +32,10 @@ A custom Model Context Protocol (MCP) server that bridges Viber Bot API with you
 ```bash
 cd d:\dev\agent
 npm install
+git submodule update --init --recursive
 ```
+
+The project depends on the `whatsapp-mcp` submodule for WhatsApp bridge files and MCP tooling.
 
 ### 2. Build the Project
 
