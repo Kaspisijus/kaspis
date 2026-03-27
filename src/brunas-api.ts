@@ -31,6 +31,7 @@ export class BrunasApiClient {
   private authClient: AxiosInstance;
   private apiClient: AxiosInstance;
   private jwt: string | null = null;
+  private reAuthCallback: (() => Promise<string>) | null = null;
 
   constructor(
     private email: string,
@@ -79,17 +80,54 @@ export class BrunasApiClient {
   }
 
   /**
+   * Set JWT directly (for token-based auth without credentials)
+   */
+  setJwt(jwt: string): void {
+    this.jwt = jwt;
+  }
+
+  /**
+   * Set a callback that will be invoked instead of email/password login.
+   * The callback must return a fresh JWT string.
+   */
+  setReAuthCallback(cb: () => Promise<string>): void {
+    this.reAuthCallback = cb;
+  }
+
+  /**
+   * Create a client from a pre-existing JWT token (no credentials needed).
+   */
+  static fromToken(jwt: string, clientBaseUrl: string): BrunasApiClient {
+    const client = new BrunasApiClient("", "", clientBaseUrl);
+    client.setJwt(jwt);
+    return client;
+  }
+
+  /**
    * Login and store JWT + refresh token
    */
   async login(): Promise<void> {
-    const response = await this.authClient.post("/auth/login", {
-      email: this.email,
-      password: this.password,
-      remember: false,
-      login_type: "email_password",
-    });
+    // Prefer re-auth callback (interactive browser login)
+    if (this.reAuthCallback) {
+      this.jwt = await this.reAuthCallback();
+      return;
+    }
 
-    this.jwt = response.data.data.jwt;
+    // Fall back to email/password login
+    if (this.email && this.password) {
+      const response = await this.authClient.post("/auth/login", {
+        email: this.email,
+        password: this.password,
+        remember: false,
+        login_type: "email_password",
+      });
+      this.jwt = response.data.data.jwt;
+      return;
+    }
+
+    throw new Error(
+      "No authentication method available. Set credentials or a re-auth callback."
+    );
   }
 
   /**

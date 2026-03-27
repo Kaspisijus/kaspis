@@ -7,6 +7,9 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import axios from "axios";
+import express from "express";
+import { chromium } from "playwright";
 import { BrunasApiClient } from "./brunas-api.js";
 
 // Simple error classes (same pattern as index.ts)
@@ -26,24 +29,294 @@ const ErrorCode = {
   InternalError: "InternalError",
 };
 
-// Lazy-initialised API client (login on first tool call)
+// ─── Auth state ──────────────────────────────────────────────────────
+
+interface ClientInfo {
+  id: string;
+  name: string;
+  domain: string;
+}
+
+let storedJwt: string | null = null;
+let resolvedClients: ClientInfo[] | null = null;
+let selectedClientId: string | null = null;
 let brunasClient: BrunasApiClient | null = null;
 
-function getClient(): BrunasApiClient {
-  if (!brunasClient) {
-    const email = process.env.BRUNAS_EMAIL;
-    const password = process.env.BRUNAS_PASSWORD;
-    const clientUrl = process.env.BRUNAS_CLIENT_URL;
+const LOGIN_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Brunas TMS Login</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+           display: flex; justify-content: center; align-items: center;
+           min-height: 100vh; background: #f0f2f5; }
+    .card { background: #fff; padding: 2.5rem; border-radius: 12px;
+            box-shadow: 0 2px 12px rgba(0,0,0,.1); width: 380px; }
+    h1 { font-size: 1.4rem; margin-bottom: .3rem; color: #1a1a2e; }
+    .logo { display: block; margin: 0 auto 1rem; max-width: 200px; height: auto; }
+    .sub { color: #666; font-size: .85rem; margin-bottom: 1.5rem; text-align: center; }
+    label { display: block; font-size: .85rem; font-weight: 500; margin-bottom: .3rem; color: #333; }
+    input { width: 100%; padding: .65rem .75rem; border: 1px solid #d0d5dd; border-radius: 8px;
+            font-size: .95rem; margin-bottom: 1rem; outline: none; transition: border .15s; }
+    input:focus { border-color: #4f46e5; }
+    button { width: 100%; padding: .7rem; background: #4f46e5; color: #fff; font-size: 1rem;
+             font-weight: 600; border: none; border-radius: 8px; cursor: pointer; transition: background .15s; }
+    button:hover { background: #4338ca; }
+    button:disabled { background: #a5b4fc; cursor: not-allowed; }
+    .error { background: #fef2f2; color: #991b1b; padding: .6rem .8rem; border-radius: 8px;
+             font-size: .85rem; margin-bottom: 1rem; display: none; }
+    .success { background: #f0fdf4; color: #166534; padding: .6rem .8rem; border-radius: 8px;
+               font-size: .85rem; margin-bottom: 1rem; display: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <img src="https://savitarna.brunas.lt/assets/brunas-logo-transparent-apkDHNna.png" alt="Brunas" class="logo">
+    <p class="sub">Sign in to connect your account</p>
+    <div class="error" id="err"></div>
+    <div class="success" id="ok"></div>
+    <form id="f">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" required autocomplete="email" autofocus>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" required autocomplete="current-password">
+      <button type="submit" id="btn">Sign in</button>
+    </form>
+  </div>
+  <script>
+    const f = document.getElementById('f');
+    const btn = document.getElementById('btn');
+    const err = document.getElementById('err');
+    const ok = document.getElementById('ok');
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.style.display = 'none';
+      ok.style.display = 'none';
+      btn.disabled = true;
+      btn.textContent = 'Signing in\u2026';
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: document.getElementById('email').value,
+            password: document.getElementById('password').value,
+          }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          ok.textContent = 'Logged in! You can close this window.';
+          ok.style.display = 'block';
+          f.style.display = 'none';
+        } else {
+          err.textContent = data.error || 'Login failed';
+          err.style.display = 'block';
+          btn.disabled = false;
+          btn.textContent = 'Sign in';
+        }
+      } catch (ex) {
+        err.textContent = 'Network error: ' + ex.message;
+        err.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = 'Sign in';
+      }
+    });
+  </script>
+</body>
+</html>`;
 
-    if (!email || !password || !clientUrl) {
+/**
+ * Start a local Express server with a login form, open it in Chromium,
+ * and wait for the user to authenticate. The server POSTs credentials to
+ * auth.brunas.lt server-side and captures the JWT.
+ */
+async function performBrowserLogin(): Promise<{ jwt: string }> {
+  return new Promise<{ jwt: string }>((resolve, reject) => {
+    const app = express();
+    app.use(express.json());
+
+    let settled = false;
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+
+    app.get("/", (_req, res) => {
+      res.type("html").send(LOGIN_HTML);
+    });
+
+    app.post("/api/login", async (req, res) => {
+      const { email, password } = req.body ?? {};
+      if (!email || !password) {
+        res.json({ ok: false, error: "Email and password are required." });
+        return;
+      }
+      try {
+        const authRes = await axios.post("https://auth.brunas.lt/auth/login", {
+          email,
+          password,
+          remember: false,
+          login_type: "email_password",
+        });
+        const jwt = authRes.data?.data?.jwt;
+        if (!jwt) {
+          res.json({ ok: false, error: "Unexpected response — no JWT returned." });
+          return;
+        }
+        res.json({ ok: true });
+        if (!settled) {
+          settled = true;
+          // Give the response a moment to reach the browser, then clean up
+          setTimeout(() => {
+            httpServer.close();
+            browser?.close().catch(() => {});
+            resolve({ jwt });
+          }, 500);
+        }
+      } catch (ex: unknown) {
+        const axErr = ex as { response?: { status?: number; data?: { message?: string } } };
+        const msg =
+          axErr.response?.data?.message ??
+          (axErr.response?.status === 401 ? "Invalid email or password." : String(ex));
+        res.json({ ok: false, error: msg });
+      }
+    });
+
+    const httpServer = app.listen(0, "127.0.0.1", async () => {
+      const addr = httpServer.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      const url = `http://127.0.0.1:${port}`;
+      console.error(`Brunas login page: ${url}`);
+
+      try {
+        browser = await chromium.launch({ headless: false });
+        const ctx = await browser.newContext();
+        const page = await ctx.newPage();
+        await page.goto(url);
+      } catch {
+        // If Playwright fails, the user can still open the URL manually
+        console.error(`Open ${url} in your browser to log in.`);
+      }
+    });
+
+    // 3-minute timeout
+    setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        httpServer.close();
+        browser?.close().catch(() => {});
+        reject(
+          new McpError(
+            ErrorCode.InternalError,
+            "Login timed out — no credentials submitted within 3 minutes."
+          )
+        );
+      }
+    }, 180_000);
+  });
+}
+
+/**
+ * Query the Brunas auth API to determine which clients the user has
+ * access to, then resolve them against the full client list.
+ */
+async function resolveClients(
+  jwt: string
+): Promise<{ isSuper: boolean; clients: ClientInfo[] }> {
+  const authHttp = axios.create({
+    baseURL: "https://savitarna.brunas.lt",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: `jwt=${jwt}`,
+    },
+  });
+
+  // 1. Get access info
+  const accessRes = await authHttp.get("/auth/auth/access");
+  const accessData = accessRes.data?.data ?? {};
+  const isSuper: boolean = accessData.super === true;
+  const accessList: Array<{ clientId: string }> = accessData.access ?? [];
+  const allowedIds = new Set(accessList.map((a) => a.clientId));
+
+  // 2. Get full client list
+  const clientsRes = await authHttp.get("/auth/clients");
+  const allClients: Array<{
+    id: string;
+    name: string;
+    domains?: string[];
+  }> = clientsRes.data?.data ?? [];
+
+  // 3. Filter to accessible clients
+  const filtered = isSuper
+    ? allClients
+    : allClients.filter((c) => allowedIds.has(c.id));
+
+  const clients: ClientInfo[] = filtered.map((c) => ({
+    id: c.id,
+    name: c.name,
+    domain: c.domains?.[0] ?? "",
+  }));
+
+  return { isSuper, clients };
+}
+
+/**
+ * Get (or create) the BrunasApiClient. Triggers browser login and
+ * client resolution as needed.
+ */
+async function getClient(): Promise<BrunasApiClient> {
+  if (brunasClient) return brunasClient;
+
+  // Step 1: ensure we have a JWT
+  if (!storedJwt) {
+    const result = await performBrowserLogin();
+    storedJwt = result.jwt;
+    resolvedClients = null;
+    selectedClientId = null;
+  }
+
+  // Step 2: resolve available clients
+  if (!resolvedClients) {
+    const { clients } = await resolveClients(storedJwt);
+    resolvedClients = clients;
+
+    if (clients.length === 0) {
       throw new McpError(
         ErrorCode.InternalError,
-        "Missing BRUNAS_EMAIL, BRUNAS_PASSWORD, or BRUNAS_CLIENT_URL in environment"
+        "No accessible clients found for this account."
       );
     }
 
-    brunasClient = new BrunasApiClient(email, password, clientUrl);
+    if (clients.length === 1) {
+      // Auto-select the only client
+      selectedClientId = clients[0].id;
+    }
   }
+
+  // Step 3: ensure a client is selected
+  if (!selectedClientId) {
+    const listing = resolvedClients
+      .map((c, i) => `${i + 1}. ${c.name} (https://${c.domain}) — ID: ${c.id}`)
+      .join("\n");
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `Multiple clients available. Call brunas_select_client with clientId:\n${listing}`
+    );
+  }
+
+  // Step 4: build the API client
+  const selected = resolvedClients.find((c) => c.id === selectedClientId)!;
+  const clientUrl = `https://${selected.domain}`;
+
+  brunasClient = BrunasApiClient.fromToken(storedJwt, clientUrl);
+  brunasClient.setReAuthCallback(async () => {
+    // On 401, re-trigger browser login
+    const result = await performBrowserLogin();
+    storedJwt = result.jwt;
+    // Keep the same client selection — just refresh the token
+    return result.jwt;
+  });
+
   return brunasClient;
 }
 
@@ -326,6 +599,39 @@ const datatableInputProperties = {
 // ─── Tool definitions ────────────────────────────────────────────────
 
 const tools = [
+  {
+    name: "brunas_login",
+    description:
+      "Authenticate to Brunas TMS by opening a browser login window. Opens a Chromium browser to the Brunas login page — log in manually. After login, resolves available clients. If only one client is accessible, it is auto-selected. If multiple clients are available, returns the list and requires a follow-up call to brunas_select_client.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "brunas_logout",
+    description:
+      "Log out of Brunas TMS. Clears the current session and invalidates the JWT token.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "brunas_select_client",
+    description:
+      "Select which Brunas client (company) to work with. Use after brunas_login when multiple clients are available. Pass the client ID from the list returned by brunas_login.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        clientId: {
+          type: "string",
+          description: "Client ID or exact client name to select",
+        },
+      },
+      required: ["clientId"],
+    },
+  },
   {
     name: "find_carriages",
     description: `Search carriages (transport trips) in Brunas TMS with filters and pagination.\n${CARRIAGE_FIELDS_DOC}`,
@@ -853,7 +1159,117 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const args = (toolArgs ?? {}) as Record<string, unknown>;
 
   try {
-    const client = getClient();
+    // ── Login / client selection tools (handled before getClient) ───
+    if (toolName === "brunas_login") {
+      // Reset all auth state
+      storedJwt = null;
+      resolvedClients = null;
+      selectedClientId = null;
+      brunasClient = null;
+
+      const { jwt } = await performBrowserLogin();
+      storedJwt = jwt;
+
+      const { isSuper, clients } = await resolveClients(jwt);
+      resolvedClients = clients;
+
+      if (clients.length === 0) {
+        return {
+          content: [{ type: "text" as const, text: "Logged in, but no accessible clients found for this account." }],
+        };
+      }
+
+      if (clients.length === 1) {
+        selectedClientId = clients[0].id;
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Logged in. Selected client: ${clients[0].name} (https://${clients[0].domain})`,
+          }],
+        };
+      }
+
+      const listing = clients
+        .map((c, i) => `${i + 1}. ${c.name} (https://${c.domain}) — ID: ${c.id}`)
+        .join("\n");
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Logged in${isSuper ? " (super user)" : ""}. Multiple clients available:\n${listing}\n\nCall brunas_select_client with the client ID to continue.`,
+        }],
+      };
+    }
+
+    if (toolName === "brunas_logout") {
+      if (!storedJwt) {
+        return {
+          content: [{ type: "text" as const, text: "Already logged out." }],
+        };
+      }
+
+      // Call the Brunas logout endpoint to invalidate the JWT server-side
+      try {
+        await axios.post(
+          "https://savitarna.brunas.lt/auth/auth/logout?cookie_domain=.brunas.lt",
+          {},
+          { headers: { Cookie: `jwt=${storedJwt}` } }
+        );
+      } catch {
+        // Best-effort — clear local state regardless
+      }
+
+      // Clear all local auth state
+      storedJwt = null;
+      resolvedClients = null;
+      selectedClientId = null;
+      brunasClient = null;
+
+      return {
+        content: [{ type: "text" as const, text: "Logged out of Brunas TMS." }],
+      };
+    }
+
+    if (toolName === "brunas_select_client") {
+      if (!storedJwt) {
+        throw new McpError(ErrorCode.InvalidRequest, "Not logged in. Call brunas_login first.");
+      }
+
+      const clientId = args.clientId as string;
+      if (!clientId) {
+        throw new McpError(ErrorCode.InvalidRequest, "clientId is required");
+      }
+
+      // Re-resolve if needed
+      if (!resolvedClients) {
+        const { clients } = await resolveClients(storedJwt);
+        resolvedClients = clients;
+      }
+
+      const match = resolvedClients.find(
+        (c) => c.id === clientId || c.name.toLowerCase() === clientId.toLowerCase()
+      );
+      if (!match) {
+        const listing = resolvedClients
+          .map((c) => `- ${c.name} (${c.id})`)
+          .join("\n");
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          `Client "${clientId}" not found. Available clients:\n${listing}`
+        );
+      }
+
+      selectedClientId = match.id;
+      brunasClient = null; // Force re-creation with the new client URL
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Selected client: ${match.name} (https://${match.domain})`,
+        }],
+      };
+    }
+
+    const client = await getClient();
 
     switch (toolName) {
       // ── Find carriages ───────────────────────────────────────
