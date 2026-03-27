@@ -183,6 +183,65 @@ export class BrunasApiClient {
     return response.data;
   }
 
+  async createDriver(data: Record<string, unknown>): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.post(`/api/v3/drivers/`, data);
+    return response.data;
+  }
+
+  async updateDriver(id: string, data: Record<string, unknown>): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.put(
+      `/api/v3/drivers/${encodeURIComponent(id)}`,
+      data
+    );
+    return response.data;
+  }
+
+  // ─── Cadencies (Vehicle-Driver timelines) ───────────────────────
+
+  async findCadencies(
+    filters: FilterItem[] = [],
+    page = 0,
+    pageSize = 25,
+    sort?: SortItem[],
+    quickFilter?: string[]
+  ): Promise<unknown> {
+    await this.ensureAuth();
+    const body = this.buildDatatableRequest(filters, page, pageSize, sort, quickFilter);
+    const response = await this.apiClient.post(
+      `/api/v3/vehicle-drivers/datatable/list`,
+      body
+    );
+    return response.data;
+  }
+
+  async getCadency(id: number): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.get(
+      `/api/v3/vehicle-driver/${encodeURIComponent(id)}/form`
+    );
+    return response.data;
+  }
+
+  async createCadency(data: Record<string, unknown>): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.post(
+      `/api/v3/vehicle-driver/`,
+      data
+    );
+    return response.data;
+  }
+
+  async updateCadency(id: number, data: Record<string, unknown>): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.put(
+      `/api/v3/vehicle-driver/${encodeURIComponent(id)}`,
+      data
+    );
+    return response.data;
+  }
+
   // ─── Vehicles ───────────────────────────────────────────────
 
   async findVehicles(
@@ -308,7 +367,107 @@ export class BrunasApiClient {
     return response.data;
   }
 
+  // ─── Vehicle-Trailer Links ───────────────────────────────
+
+  async getVehicleTrailer(id: number): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.get(
+      `/api/v3/vehicle-trailers/${encodeURIComponent(id)}`
+    );
+    return response.data;
+  }
+
+  async createVehicleTrailer(data: Record<string, unknown>): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.post(
+      `/api/v3/vehicle-trailers/`,
+      data
+    );
+    return response.data;
+  }
+
+  async editVehicleTrailer(
+    id: number,
+    data: Record<string, unknown>
+  ): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.put(
+      `/api/v3/vehicle-trailers/${encodeURIComponent(id)}/edit`,
+      data
+    );
+    return response.data;
+  }
+
+  async finishVehicleTrailer(
+    id: number,
+    data: Record<string, unknown>
+  ): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.post(
+      `/api/v3/vehicle-trailers/${encodeURIComponent(id)}/finish`,
+      data
+    );
+    return response.data;
+  }
+
+  async getIntersectingVehicleTrailers(
+    trailerId: number,
+    data: {
+      dateFrom: string;
+      dateTo: string | null;
+      skipVehicleId: number | null;
+      skipTrailerId: number | null;
+    }
+  ): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.post(
+      `/api/v3/vehicle-trailers/trailers/${encodeURIComponent(trailerId)}/intersecting`,
+      data
+    );
+    return response.data;
+  }
+
+  async deleteVehicleTrailer(id: number): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.delete(
+      `/api/v3/vehicle-trailers/${encodeURIComponent(id)}/delete`
+    );
+    return response.data;
+  }
+
   // ─── Vehicle Service ──────────────────────────────────────
+
+  async getVehicleById(id: number): Promise<Record<string, unknown>> {
+    await this.ensureAuth();
+    const response = await this.apiClient.get(
+      `/api/v2/vehicles/${encodeURIComponent(id)}`
+    );
+    return response.data;
+  }
+
+  async searchVehicleModels(query: string): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.get(
+      `/api/v2/vehicles/models/search`,
+      { params: { query } }
+    );
+    return response.data;
+  }
+
+  async createVehicle(data: Record<string, unknown>): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.post(`/api/v3/vehicles/`, data);
+    return response.data;
+  }
+
+  async updateVehicle(id: number, data: Record<string, unknown>): Promise<unknown> {
+    await this.ensureAuth();
+    const response = await this.apiClient.put(
+      `/api/v3/vehicles/${encodeURIComponent(id)}`,
+      data
+    );
+    return response.data;
+  }
 
   async registerVehicleDamage(opts: {
     vehicleId: number;

@@ -1,209 +1,89 @@
-# Viber Agent MCP Server - Development Guide
+# Automation MCP Server – Development Guide
 
-This document contains development guidelines and references for the Viber Agent MCP Server.
+This guide replaces the legacy Viber documentation and explains how to extend the automation-focused MCP services contained in this repository.
 
-## SDK Documentation
+## Key References
 
-- **MCP SDK**: https://modelcontextprotocol.io/
-- **TypeScript SDK**: https://github.com/modelcontextprotocol/typescript-sdk
-- **Viber Bot API**: https://developers.viber.com/docs/api/rest-bot-api/
+- **MCP Specification** – https://modelcontextprotocol.io/specification/latest
+- **TypeScript SDK** – https://github.com/modelcontextprotocol/typescript-sdk
+- **Playwright** – https://playwright.dev/
 
-## Key Concepts
+## Core Architecture
 
-### Model Context Protocol (MCP)
+1. `src/index.ts` – exposes generic tools (`execute_playwright`, `execute_command`).
+2. `src/brunas-*.ts` – Brunas TMS-specific MCP server/helpers.
+3. `src/bss-*.ts` – BSS accounting integration.
+4. `src/whatsapp-*.ts` – WhatsApp poller + bridge utilities.
 
-MCP is an open protocol that enables seamless integration between LLM applications and external data sources/tools. This server implements the MCP server interface to expose tools that Claude and other agents can use.
+All entry points compile to `dist/` via `npm run build` and can be launched independently.
 
-### Viber Bot API
+## Adding a Tool to the Default Server
 
-Viber's bot API allows you to:
-- Send/receive messages
-- Send rich media (images, videos, files)
-- Receive user events (subscriptions, online status)
-- Set up webhooks for real-time updates
-
-## Implementation Details
-
-### Message Flow
-
-1. User sends message in Viber
-2. Viber sends webhook POST to your server
-3. `ViberBotAPI.parseWebhookPayload()` parses the message
-4. `handleViberMessage()` processes it and communicates with LLM
-5. LLM may use tools (Playwright, commands, etc.)
-6. Response is sent back via `sendMessage()`
-
-### Tool Definitions
-
-Tools are defined in `src/index.ts` using the MCP ToolDefinition schema:
-- `name`: Unique tool identifier
-- `description`: What the tool does
-- `inputSchema`: JSON schema for tool inputs
-
-Standard MCP tools:
-- `send_viber_message`: Send Viber messages
-- `execute_playwright`: Browser automation
-- `get_conversation_history`: Message history
-- `execute_command`: System commands
-
-## Testing
-
-### Manual Testing
-
-```bash
-# 1. Start the MCP server
-npm run dev
-
-# 2. In another terminal, test webhook
-curl -X POST http://localhost:3001/webhook/viber \
-  -H "Content-Type: application/json" \
-  -d '{
-    "event": "message",
-    "sender": {"id": "test_user_123"},
-    "message": {"text": "Hello bot"}
-  }'
-```
-
-### Testing with ngrok
-
-```bash
-# 1. Start ngrok
-ngrok http 3001
-
-# 2. Get public URL (e.g., https://abc123.ngrok.io)
-
-# 3. Set webhook in Viber Business Hub
-
-# 4. Send message in Viber and monitor logs
-```
-
-## Performance Considerations
-
-- **Playwright**: Browser launches can be slow (2-5s). Consider reusing the page.
-- **Viber API**: Rate limits apply. Cache responses where possible.
-- **Memory**: Keep conversation history limited (e.g., last 100 messages per user)
-
-## Security Best Practices
-
-### Authentication
-- Validate webhook signatures from Viber
-- Use HTTPS always in production
-- Store tokens in encrypted environment variables
-
-### Input Validation
-- Sanitize user messages before acting on them
-- Validate selectors in Playwright commands
-- Use allowlist for executable commands
-
-### Rate Limiting
-- Limit message frequency per user
-- Limit command execution per minute
-- Implement cooldown periods for expensive operations
-
-## Error Handling
-
-The server implements error handling at multiple levels:
-
-1. **API Level**: Catch and return MCP errors
-2. **Viber Level**: Handle API failures gracefully
-3. **Playwright Level**: Manage browser errors
-4. **System Level**: Validate all inputs
-
-## Extending the Server
-
-### Adding New Tools
-
-```typescript
-// In src/index.ts
-{
-  name: "my_new_tool",
-  description: "What it does",
-  inputSchema: {
-    type: "object",
-    properties: {
-      param1: { type: "string" }
-    },
-    required: ["param1"]
-  }
-}
-
-// In the request handler
-case "my_new_tool": {
-  // Implementation
-  break;
-}
-```
-
-### Adding New Viber Features
-
-```typescript
-// In src/viber.ts
-async myNewFeature(userId: string) {
-  // Implementation using axios
-}
-```
-
-### Custom Webhook Handlers
-
-```typescript
-// In src/webhook.ts
-app.post("/webhook/custom", (req, res) => {
-  // Your custom handler
-  res.status(200).json({ status: "ok" });
+```ts
+// 1. Extend the tools array
+tools.push({
+	name: "my_tool",
+	description: "Describe behaviour",
+	inputSchema: {
+		type: "object",
+		properties: {
+			param: { type: "string" }
+		},
+		required: ["param"]
+	}
 });
+
+// 2. Handle the tool in CallToolRequestSchema
+case "my_tool": {
+	const value = args.param as string;
+	// Do work
+	return {
+		content: [{ type: "text", text: `Processed ${value}` }]
+	};
+}
 ```
 
-## Deployment
+## Development Workflow
 
-### Prerequisites
-- Node.js 18+ server
-- Public HTTPS URL
-- Environment variables configured
+1. `npm run watch` – incremental TypeScript builds.
+2. `npm start` – run the compiled automation server.
+3. `npm run start:brunas` / `start:bss` / `start:poller` – start domain-specific services.
+4. Restart MCP servers from VS Code after changing `.vscode/mcp.json`.
 
-### Steps
-1. Clone repository to server
-2. Install dependencies: `npm install`
-3. Build project: `npm run build`
-4. Set environment variables in `.env`
-5. Start server: `npm start`
-6. Set webhook URL in Viber Business Hub
-
-### Using PM2 for Process Management
+## Testing Playwright Actions
 
 ```bash
-npm install -g pm2
-pm2 start dist/index.js --name viber-mcp
-pm2 save
-pm2 startup
+npm run build
+node dist/index.js
+
+# In another terminal, call the MCP server (via Copilot/Claude) with:
+{"tool":"execute_playwright","action":"navigate","url":"https://example.com"}
 ```
 
-## References
+Troubleshooting tips:
+- Run `npx playwright install chromium` the first time.
+- Use descriptive selectors and add `wait` actions between steps.
+- Inspect the terminal output for serialized results/errors.
 
-- MCP Specification: https://modelcontextprotocol.io/specification/latest
-- Viber API Docs: https://developers.viber.com/docs/api/rest-bot-api/
-- Playwright Docs: https://playwright.dev/
-- Node.js Docs: https://nodejs.org/docs/
+## Security Checklist
 
-## Common Issues and Solutions
+- Keep secrets in `.env` (never in source control).
+- Restrict `execute_command` usage to trusted contexts.
+- Validate all external inputs before passing them to APIs.
+- Consider rate limits or authorization checks inside domain-specific servers.
 
-### Webhook not receiving messages
-**Problem**: Viber webhook not triggering
-**Solution**: 
-- Verify webhook URL is publicly accessible
-- Check bot API token is valid
-- Ensure webhook handler returns 200 status
+## Common Issues
 
-### Playwright timeout
-**Problem**: `Playwright timeout waiting for selector`
-**Solution**:
-- Increase timeout value
-- Wait for page load with `waitForLoadState()`
-- Verify selector exists on page
+| Issue | Resolution |
+| --- | --- |
+| `Cannot find module './viber.js'` | Remove stale imports (Viber is no longer included) and rebuild. |
+| Playwright timeout | Ensure the target selector exists, add waits, and confirm the page fully loads. |
+| MCP client cannot connect | Verify `.vscode/mcp.json`, rerun `npm run build`, and restart MCP servers from VS Code. |
 
-### MCP connection fails
-**Problem**: `Error connecting to MCP server`
-**Solution**:
-- Verify `.vscode/mcp.json` syntax
-- Run `npm run build` to generate dist/
-- Check Node.js version >= 18
-- Review server logs for errors
+## Extending Beyond Playwright
+
+Follow the patterns used in `brunas-server.ts` and `bss-server.ts` for additional APIs: define JSON schemas, wrap HTTP clients in `src/brunas-api.ts`, and surface them as MCP tools. Keep dependencies isolated so the default automation server remains lightweight.
+
+---
+
+By removing the Viber dependency the automation server now serves as a neutral starting point for any MCP-based workflow. Build specialized adapters in new files rather than reintroducing chat-platform-specific logic here.

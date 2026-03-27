@@ -109,10 +109,28 @@ const TASK_TYPES: Record<number, string> = {
   5: "Loading",
 };
 
+const CADENCY_STATUS_LABELS: Record<string, string> = {
+  planning: "Planning",
+  current: "Current",
+  ended: "Ended",
+};
+
+function todayIsoDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 // ─── Command parsing & execution ─────────────────────────────────────
 
 interface ParsedCommand {
-  type: "find_carriages" | "carriages_by_vehicle" | "find_drivers" | "find_vehicles" | "search_vehicles" | "register_damage" | "unknown";
+  type:
+    | "find_carriages"
+    | "carriages_by_vehicle"
+    | "find_drivers"
+    | "find_vehicles"
+    | "search_vehicles"
+    | "register_damage"
+    | "cadency_search"
+    | "unknown";
   filters: Array<{ field: string; value: string | string[] | number[]; operator: string }>;
   quickFilter?: string[];
   pageSize: number;
@@ -122,6 +140,9 @@ interface ParsedCommand {
   damageDescription?: string;
   _userPhone?: string;
   _chatJid?: string;
+  driverName?: string;
+  targetDate?: string;
+  statusFilter?: string[];
 }
 
 function parseCommand(text: string): ParsedCommand {
@@ -193,6 +214,44 @@ function parseCommand(text: string): ParsedCommand {
     const pageSize = countMatch ? parseInt(countMatch[1], 10) : 5;
 
     return { type: "find_carriages", filters, pageSize };
+  }
+
+  // Who is driving <vehicle>
+  const whoDrivingMatch = text.match(
+    /(?:who\s+(?:is\s+)?driving|kas\s+(?:dabar\s+)?vairuoja)\s+(?:truck|auto|vilkik\w*|vehicle)?\s*([A-Z0-9]{3,})/i
+  );
+  if (whoDrivingMatch) {
+    const plate = whoDrivingMatch[1].replace(/[^A-Z0-9]/g, "").toUpperCase();
+    if (plate.length >= 3) {
+      return {
+        type: "cadency_search",
+        filters: [],
+        pageSize: 5,
+        vehiclePlate: plate,
+        statusFilter: ["current"],
+        targetDate: todayIsoDate(),
+      };
+    }
+  }
+
+  // What truck is <driver> driving?
+  const driverTruckEn = text.match(
+    /(?:what|which)\s+(?:truck|vehicle|auto)\s+(?:is\s+)?(.+?)\s+(?:driving|drives)/i
+  );
+  const driverTruckLt = text.match(/kok(?:i|į)\s+(?:vilkik\w*|auto)\s+vairuoja\s+(.+)/i);
+  const driverNameRaw = driverTruckEn?.[1] ?? driverTruckLt?.[1];
+  if (driverNameRaw) {
+    const driverName = driverNameRaw.replace(/[^A-Za-zĀ-ž\s'-]/gi, " ").trim();
+    if (driverName) {
+      return {
+        type: "cadency_search",
+        filters: [],
+        pageSize: 5,
+        driverName,
+        statusFilter: ["current"],
+        targetDate: todayIsoDate(),
+      };
+    }
   }
 
   // Find drivers
@@ -289,6 +348,97 @@ function formatVehicleDetailed(v: Record<string, unknown>): string {
   return text.trimEnd();
 }
 
+function parseDateValue(value: unknown): Date | null {
+  if (value === undefined || value === null) return null;
+  if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
+  if (typeof value === "number") {
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const d = new Date(trimmed);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+}
+
+function formatDateDisplay(date: Date | null): string {
+  if (!date) return "—";
+  return date.toISOString().slice(0, 10);
+}
+
+function getCadencyDriverName(row: Record<string, unknown>, fallback?: string): string {
+  const driver = row.driver as Record<string, unknown> | undefined;
+  if (driver) {
+    const name = `${driver.firstName ?? ""} ${driver.lastName ?? ""}`.trim();
+    if (name) return name;
+  }
+  if (typeof row.driver === "string") return row.driver;
+  if (typeof row.driverName === "string") return row.driverName;
+  if (typeof fallback === "string" && fallback.trim()) return fallback.trim();
+  return "Nežinomas vairuotojas";
+}
+
+function getCadencyVehicleNumber(row: Record<string, unknown>): string {
+  const vehicle = row.vehicle as Record<string, unknown> | undefined;
+  if (vehicle?.number) return String(vehicle.number);
+  if (typeof row.vehicleNumber === "string") return row.vehicleNumber;
+  return "Nežinomas vilkikas";
+}
+
+function formatCadencyRow(row: Record<string, unknown>): string {
+  const driverName = getCadencyDriverName(row);
+  const vehicleNumber = getCadencyVehicleNumber(row);
+  const statusRaw = typeof row.status === "string" ? row.status : "";
+  const statusLabel = CADENCY_STATUS_LABELS[statusRaw] ?? statusRaw ?? "";
+  const from = formatDateDisplay(parseDateValue(row.dateFrom));
+  const to = formatDateDisplay(parseDateValue(row.dateTo));
+  return `👤 ${driverName} | 🚚 ${vehicleNumber} | ${statusLabel || "Unknown"}\n${from} → ${to}`;
+}
+
+function cadencyCoversDate(row: Record<string, unknown>, target: Date): boolean {
+  const from = parseDateValue(row.dateFrom);
+  if (!from) return false;
+  const start = from.getTime();
+  const check = target.getTime();
+  if (check < start) return false;
+  const to = parseDateValue(row.dateTo);
+  if (!to) return true;
+  return check <= to.getTime();
+}
+
+function buildCadencyAnswer(
+  row: Record<string, unknown>,
+  target: Date,
+  context: { vehiclePlate?: string; driverName?: string }
+): string {
+  const driverName = getCadencyDriverName(row, context.driverName);
+  const vehicleNumber = getCadencyVehicleNumber(row);
+  const from = formatDateDisplay(parseDateValue(row.dateFrom));
+  const toDate = parseDateValue(row.dateTo);
+  const to = formatDateDisplay(toDate);
+  const active = cadencyCoversDate(row, target);
+  const rangeText = toDate ? `${from} → ${to}` : `${from} → dabar`;
+
+  if (context.vehiclePlate) {
+    if (active) {
+      return `Šiuo metu vilkiką ${vehicleNumber} vairuoja ${driverName} (${rangeText}).`;
+    }
+    return `Vilkiką ${vehicleNumber} vairavo ${driverName} (${rangeText}).`;
+  }
+
+  if (context.driverName) {
+    if (active) {
+      return `${driverName} šiuo metu vairuoja vilkiką ${vehicleNumber} (${rangeText}).`;
+    }
+    return `${driverName} paskutinė kadencija: vilkikas ${vehicleNumber} (${rangeText}).`;
+  }
+
+  return formatCadencyRow(row);
+}
+
 // ─── Execute command ─────────────────────────────────────────────────
 
 async function executeCommand(cmd: ParsedCommand): Promise<string> {
@@ -326,6 +476,72 @@ async function executeCommand(cmd: ParsedCommand): Promise<string> {
       const carriages = cData.data ?? [];
       if (carriages.length === 0) return `No carriages found for vehicle ${cmd.vehiclePlate}.`;
       return `Carriages for ${cmd.vehiclePlate}:\n\n` + carriages.map(formatCarriage).join("\n");
+    }
+
+    case "cadency_search": {
+      const filters = [...cmd.filters];
+      let quickFilter = cmd.quickFilter;
+
+      if (cmd.vehiclePlate) {
+        const normalized = cmd.vehiclePlate.replace(/\s+/g, "").toUpperCase();
+        const vData = (await client.searchActiveVehicles(normalized)) as {
+          data?: Array<{ id: number; number: string }>;
+        };
+        const vehicles = vData.data ?? [];
+        const match = vehicles.find(
+          (v) => v.number.replace(/\s+/g, "").toUpperCase() === normalized
+        ) ?? vehicles[0];
+        if (!match) {
+          return `Vilkikas ${cmd.vehiclePlate} nerastas.`;
+        }
+        filters.push({ field: "vehicle", operator: "isAnyOf", value: [match.id] });
+      }
+
+      if (cmd.driverName) {
+        if (!quickFilter || quickFilter.length === 0) {
+          quickFilter = [cmd.driverName];
+        }
+      }
+
+      if (cmd.statusFilter && cmd.statusFilter.length) {
+        filters.push({ field: "status", operator: "isAnyOf", value: cmd.statusFilter });
+      }
+
+      const data = (await client.findCadencies(
+        filters,
+        0,
+        cmd.pageSize ?? 5,
+        [{ field: "dateFrom", sort: "desc" }],
+        quickFilter
+      )) as { data?: Record<string, unknown>[] };
+      const cadencies = data.data ?? [];
+      const targetDate = parseDateValue(cmd.targetDate ?? todayIsoDate()) ?? new Date();
+
+      if ((cmd.vehiclePlate || cmd.driverName) && cadencies.length === 0) {
+        if (cmd.vehiclePlate) {
+          return `Nerasta kadencijų vilkikui ${cmd.vehiclePlate}.`;
+        }
+        return `Nerasta kadencijų vairuotojui ${cmd.driverName}.`;
+      }
+
+      if (cmd.vehiclePlate || cmd.driverName) {
+        const active = cadencies.find((row) => cadencyCoversDate(row, targetDate));
+        const candidate = active ?? cadencies[0];
+        if (!candidate) {
+          return `Kadencijų nerasta.`;
+        }
+        return buildCadencyAnswer(candidate, targetDate, {
+          vehiclePlate: cmd.vehiclePlate,
+          driverName: cmd.driverName,
+        });
+      }
+
+      if (cadencies.length === 0) return "No cadencies found.";
+      const limit = cmd.pageSize ?? 5;
+      return cadencies
+        .slice(0, limit)
+        .map(formatCadencyRow)
+        .join("\n\n");
     }
 
     case "find_drivers": {
@@ -753,7 +969,14 @@ function updateDamagePhotoCount(userPhone: string, damageId: string, count: numb
 // ─── LLM-powered smart routing ──────────────────────────────────────
 
 interface LLMStepCommand {
-  tool: "find_carriages" | "carriages_by_vehicle" | "find_drivers" | "find_vehicles" | "search_vehicles" | "register_damage";
+  tool:
+    | "find_carriages"
+    | "carriages_by_vehicle"
+    | "find_drivers"
+    | "find_vehicles"
+    | "search_vehicles"
+    | "register_damage"
+    | "cadency_search";
   pageSize?: number;
   vehiclePlate?: string;
   searchQuery?: string;
@@ -762,11 +985,27 @@ interface LLMStepCommand {
   damageVehicle?: string;
   damageDescription?: string;
   urgency?: string;
+  driverName?: string;
+  status?: string;
+  statuses?: string[];
+  date?: string;
+  targetDate?: string;
   useVehicleFromPrevious?: boolean;
 }
 
 interface LLMDecision {
-  action: "attach_photos" | "register_damage" | "reply" | "command" | "multi_step" | "find_carriages" | "carriages_by_vehicle" | "find_drivers" | "find_vehicles" | "search_vehicles";
+  action:
+    | "attach_photos"
+    | "register_damage"
+    | "reply"
+    | "command"
+    | "multi_step"
+    | "find_carriages"
+    | "carriages_by_vehicle"
+    | "find_drivers"
+    | "find_vehicles"
+    | "search_vehicles"
+    | "cadency_search";
   damageId?: string;
   vehicleNumber?: string;
   description?: string;
@@ -802,6 +1041,7 @@ Galimi veiksmai (atsakyk JSON formatu):
    - "find_drivers": ieškoti vairuotojų. Parametrai: pageSize, quickFilter
    - "find_vehicles": ieškoti vilkikų. Parametrai: pageSize, quickFilter
    - "search_vehicles": ieškoti vilkiko. Parametrai: searchQuery
+  - "cadency_search": rasti kadencijas (vairuotojo-priskyrimo laikotarpius). Parametrai: vehiclePlate, driverName, status, date
    - "register_damage": registruoti gedimą. Parametrai: damageVehicle, damageDescription, urgency
 
    Pvz: "surask paskutinį reisą ir užregistruok gedimą" →
@@ -914,6 +1154,8 @@ async function executeMultiStep(
         step.vehiclePlate = ctx.lastVehiclePlate;
       } else if (step.tool === "search_vehicles") {
         step.searchQuery = ctx.lastVehiclePlate;
+      } else if (step.tool === "cadency_search") {
+        step.vehiclePlate = ctx.lastVehiclePlate;
       }
     }
 
@@ -944,6 +1186,11 @@ async function executeMultiStep(
       damageDescription: step.damageDescription ?? "",
       _userPhone: userPhone,
       _chatJid: chatJid,
+      driverName: step.driverName,
+      statusFilter: step.status
+        ? [step.status]
+        : step.statuses,
+      targetDate: step.date ?? step.targetDate,
     };
 
     try {
@@ -1280,7 +1527,7 @@ async function poll(): Promise<void> {
         }
 
         // ── LLM returned a tool name directly as action (e.g. "find_carriages") ──
-        const toolActions = ["find_carriages", "carriages_by_vehicle", "find_drivers", "find_vehicles", "search_vehicles"];
+        const toolActions = ["find_carriages", "carriages_by_vehicle", "find_drivers", "find_vehicles", "search_vehicles", "cadency_search"];
         if (toolActions.includes(decision.action)) {
           const raw = decision as unknown as Record<string, unknown>;
           try {
@@ -1292,6 +1539,11 @@ async function poll(): Promise<void> {
                 vehiclePlate: raw.vehiclePlate as string | undefined,
                 searchQuery: raw.searchQuery as string | undefined,
                 quickFilter: raw.quickFilter as string[] | undefined,
+                driverName: raw.driverName as string | undefined,
+                status: raw.status as string | undefined,
+                statuses: raw.statuses as string[] | undefined,
+                date: raw.date as string | undefined,
+                targetDate: raw.targetDate as string | undefined,
               }],
               user.phone,
               msg.chatJid,

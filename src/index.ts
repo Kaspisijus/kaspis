@@ -8,7 +8,6 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import * as fs from "fs";
 import * as path from "path";
-import { ViberBotAPI } from "./viber.js";
 import { PlaywrightExecutor } from "./playwright.js";
 
 // Simple error classes
@@ -28,43 +27,17 @@ const ErrorCode = {
   InternalError: "InternalError",
 };
 
-// Initialize Viber Bot and Playwright
-const viberBot = new ViberBotAPI(process.env.VIBER_BOT_TOKEN || "");
+// Initialize Playwright executor for browser and system actions
 const playwrightExecutor = new PlaywrightExecutor();
-
-// Store conversation history per user
-const conversationHistory = new Map<
-  string,
-  Array<{ role: string; content: string }>
->();
 
 // Initialize MCP Server
 const server = new Server({
-  name: "viber-agent-mcp",
+  name: "automation-agent-mcp",
   version: "1.0.0",
 });
 
 // Tool definitions
 const tools = [
-  {
-    name: "send_viber_message",
-    description:
-      "Send a message to a Viber user. Use this to respond to user messages.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        user_id: {
-          type: "string",
-          description: "The Viber user ID to send the message to",
-        },
-        message: {
-          type: "string",
-          description: "The message text to send",
-        },
-      },
-      required: ["user_id", "message"],
-    },
-  },
   {
     name: "execute_playwright",
     description:
@@ -102,21 +75,6 @@ const tools = [
         },
       },
       required: ["action"],
-    },
-  },
-  {
-    name: "get_conversation_history",
-    description:
-      "Retrieve the conversation history with a specific Viber user",
-    inputSchema: {
-      type: "object",
-      properties: {
-        user_id: {
-          type: "string",
-          description: "The Viber user ID",
-        },
-      },
-      required: ["user_id"],
     },
   },
   {
@@ -160,31 +118,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const args = toolArgs as Record<string, unknown>;
 
   switch (toolName) {
-    case "send_viber_message": {
-      const userId = args.user_id as string;
-      const message = args.message as string;
-
-      if (!userId || !message) {
-        throw new McpError(
-          ErrorCode.InvalidRequest,
-          "user_id and message are required"
-        );
-      }
-
-      const success = await viberBot.sendMessage(userId, message);
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: success
-              ? `Message sent to ${userId}`
-              : `Failed to send message to ${userId}`,
-          },
-        ],
-      };
-    }
-
     case "execute_playwright": {
       const action = args.action as string;
 
@@ -213,28 +146,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           `Playwright error: ${errorMessage}`
         );
       }
-    }
-
-    case "get_conversation_history": {
-      const userId = args.user_id as string;
-
-      if (!userId) {
-        throw new McpError(
-          ErrorCode.InvalidRequest,
-          "user_id is required"
-        );
-      }
-
-      const history = conversationHistory.get(userId) || [];
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(history),
-          },
-        ],
-      };
     }
 
     case "execute_command": {
@@ -281,32 +192,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Viber webhook handler
-async function handleViberMessage(
-  userId: string,
-  message: string
-) {
-  // Store message in conversation history
-  if (!conversationHistory.has(userId)) {
-    conversationHistory.set(userId, []);
-  }
-  const history = conversationHistory.get(userId)!;
-  history.push({ role: "user", content: message });
-
-  // Here you would typically:
-  // 1. Send the message to your agent/LLM
-  // 2. Get a response
-  // 3. Execute any requested tools/commands
-  // 4. Send the response back to the user
-
-  const responseMessage = `Received: "${message}". I'm ready to help! Use commands like: browse <url>, click <selector>, type <text>`;
-
-  history.push({ role: "assistant", content: responseMessage });
-
-  // Send response back to Viber
-  await viberBot.sendMessage(userId, responseMessage);
-}
-
 // Start the MCP server
 async function main() {
   // Load environment variables
@@ -318,8 +203,7 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error("Viber Agent MCP Server started successfully");
-  console.error(`Viber Bot Token: ${process.env.VIBER_BOT_TOKEN ? "✓" : "✗"}`);
+  console.error("Automation MCP Server started successfully");
 }
 
 main().catch((error) => {
@@ -328,4 +212,4 @@ main().catch((error) => {
 });
 
 // Export for testing
-export { server, handleViberMessage, conversationHistory };
+export { server };

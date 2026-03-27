@@ -1,7 +1,7 @@
 {
   "name": "agent",
   "version": "1.0.0",
-  "description": "Viber MCP Server - Connect your agent to Viber Bot API",
+  "description": "Automation MCP Server for Playwright, Brunas, and WhatsApp integrations",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
@@ -16,9 +16,9 @@
   },
   "keywords": [
     "mcp",
-    "viber",
-    "bot",
-    "api"
+    "automation",
+    "playwright",
+    "mcp"
   ],
   "author": "",
   "license": "ISC",

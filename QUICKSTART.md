@@ -1,223 +1,66 @@
-# Quick Start Guide - Viber Agent MCP Server
+git submodule update --init --recursive
+# Quick Start Guide – Automation MCP Server
 
-## 🚀 Setup (5 minutes)
+This project ships with multiple MCP entry points. The default `index.ts` exposes generic automation tools (Playwright + command execution) so you can bootstrap new agents without any chat platform dependencies.
 
-### 1. Get Your Viber Bot Token
-
-1. Go to [Viber Business Hub](https://www.viber.com/en/business/bot)
-2. Sign up or log in
-3. Create a new bot or select existing one
-4. Copy your **Bot API Token** from the settings
-
-### 2. Create .env File
-
-```bash
-# Copy the template
-cp .env.example .env
-
-# Edit and add your token
-VIBER_BOT_TOKEN=your_bot_token_here
-WEBHOOK_PORT=3001
-```
-
-### 3. Install Dependencies
+## 1. Install & Build
 
 ```bash
 npm install
 git submodule update --init --recursive
-```
-
-Project already includes:
-- TypeScript
-- MCP SDK
-- Playwright
-- Axios
-- Express
-
-### 4. Build the Project
-
-```bash
 npm run build
 ```
 
-This compiles TypeScript to JavaScript in the `dist/` folder.
+## 2. Configure Environment
 
-## 📱 Testing Locally
+Copy `.env.example` to `.env` and add only the secrets you need. If you are running the Brunas or BSS servers, place their credentials here. The default automation server can run without any required variables.
 
-### Option 1: Using ngrok (Recommended for local development)
-
-```bash
-# 1. Install ngrok from https://ngrok.com/
-
-# 2. Start ngrok in one terminal
-ngrok http 3001
-
-# You'll see:
-# Forwarding    https://abc123def456.ngrok.io -> http://localhost:3001
-
-# 3. Copy the ngrok URL
-
-# 4. In Viber Business Hub, set webhook:
-URL: https://abc123def456.ngrok.io/webhook/viber
-
-# 5. Click "Test webhook" to verify
-
-# 6. Start the MCP server (in another terminal)
-npm run dev
-
-# 7. Send a message in Viber to your bot
-```
-
-### Option 2: Using ngrok dynamically
+## 3. Run a Server
 
 ```bash
-# With ngrok pro, you can keep the same URL:
-ngrok http 3001 --authtoken your_ngrok_token --domain your-custom-domain.ngrok.io
+# Core automation MCP server
+npm start
+
+# Domain servers
+npm run start:brunas
+npm run start:bss
+npm run start:poller
 ```
 
-## 🤖 Using with Claude
+Each command uses the compiled files under `dist/`. Remember to rebuild after making TypeScript changes.
 
-The MCP server is configured in `.vscode/mcp.json`. It provides these tools:
+## 4. Register with Copilot/Claude
 
-### Send Viber Message
-```
-Tool: send_viber_message
-Inputs:
-  - user_id: The Viber user ID
-  - message: Message text to send
-```
+Ensure `.vscode/mcp.json` points to the binaries you want enabled. The default configuration already wires up:
 
-### Browser Automation
-```
-Tool: execute_playwright
-Inputs:
-  - action: navigate | click | type | screenshot | get_title | wait
-  - url: For navigate action
-  - selector: CSS selector for element
-  - text: Text to type
-  - delay: Wait time in milliseconds
-```
+- `whatsapp` MCP server (Python)
+- `playwright` helper
+- `brunas-tms` Node server
+- `bss-accounting` Node server
 
-### Get Conversation
-```
-Tool: get_conversation_history
-Inputs:
-  - user_id: User ID to get history
-```
+Start VS Code, open the Command Palette ➜ “GitHub Copilot: Restart MCP Servers” to reload the configuration.
 
-### Execute Commands
-```
-Tool: execute_command
-Inputs:
-  - command: Command to run
-  - args: Command arguments array
-```
+## 5. Available Tools (default server)
 
-## 🛠️ Available npm Commands
+- **execute_playwright** – Navigate, click, type, take screenshots, or wait using Playwright.
+- **execute_command** – Execute a shell command with optional arguments (for tightly scoped automation).
 
-```bash
-npm run build       # Compile TypeScript to dist/
-npm run dev         # Compile and run
-npm start          # Run compiled code
-npm run watch      # Watch for changes and recompile
-```
+Additional servers expose their own MCP tools (e.g., cadency search in Brunas, invoice lookups in BSS, WhatsApp automation flows).
 
-## 📊 Project Structure
+## 6. Debugging Tips
 
-```
-src/
-├── index.ts         # MCP server implementation
-├── viber.ts         # Viber Bot API wrapper
-├── playwright.ts    # Browser automation
-└── webhook.ts       # Express webhook server
+- Use `npm run watch` to rebuild automatically while iterating.
+- Run `npx playwright install chromium` if the executor complains about missing browsers.
+- Confirm the server prints “Automation MCP Server started successfully” in the terminal.
+- If MCP clients cannot connect, double-check `.vscode/mcp.json` paths and rerun the “Restart MCP Servers” command.
 
-.vscode/
-└── mcp.json         # MCP configuration
+## 7. Next Steps
 
-dist/               # Compiled JavaScript (generated)
-```
+1. Connect your preferred LLM to the MCP endpoints.
+2. Extend `PlaywrightExecutor` with custom actions if needed.
+3. Build higher-level tools in `src/brunas-*.ts`, `src/bss-*.ts`, or new modules of your choice.
 
-## 🔍 Debugging
-
-### VS Code Debugging
-
-1. Set breakpoints in `.ts` files
-2. Press `F5` to start debugging
-3. Send message in Viber to trigger code
-
-### Check MCP Connection
-
-```bash
-# Verify the server starts without errors
-npm run dev
-
-# Should output:
-# Viber Agent MCP Server started successfully
-# Viber Bot Token: ✓
-```
-
-### Webhook Testing
-
-```bash
-# Test webhook endpoint
-curl -X POST http://localhost:3001/webhook/viber \
-  -H "Content-Type: application/json" \
-  -d '{
-    "event": "message",
-    "sender": {"id": "test_user_123"},
-    "message": {"text": "Hello bot"}
-  }'
-```
-
-## 🚨 Common Issues
-
-### "Invalid Viber Bot Token"
-- Get token from Viber Business Hub
-- Make sure it's in `.env` as `VIBER_BOT_TOKEN`
-
-### Webhook not receiving messages
-- Check ngrok tunnel is active
-- Verify webhook URL in Viber Business Hub
-- Try "Test webhook" button in Viber
-
-### MCP can't connect
-- Ensure `dist/index.js` exists (run `npm run build`)
-- Check `.vscode/mcp.json` has correct path
-- Node.js version 18+ required
-
-### Playwright browser errors
-- Run `npx playwright install chromium`
-- Check selector syntax is valid
-- Wait for page to load before actions
-
-## 📚 Full Documentation
-
-See `README.md` for complete documentation including:
-- Architecture overview
-- Deployment guide
-- Security considerations
-- Integration examples
-- Extending the server
-
-See `.github/VIBER_MCP_GUIDE.md` for:
-- Development guidelines
-- Troubleshooting
-- Performance tips
-- Custom extensions
-
-## 🎯 Next Steps
-
-1. ✅ Send your first test message via Viber
-2. Add bot intelligence (connect to LLM like Claude)
-3. Create custom commands for your use case
-4. Deploy to production server
-5. Monitor and improve
-
-## 💡 Tips
-
-- Use Playwright to automate any web task
-- Store user context in conversation history
-- Add rate limiting for production
+With Viber removed, the default server has zero chat platform dependencies—perfect for repurposing in other automation projects.
 - Use webhooks instead of polling
 - Cache expensive operations
 

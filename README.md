@@ -1,123 +1,39 @@
-# Viber Agent MCP Server
+git submodule update --init --recursive
+# Automation MCP Server
 
-A custom Model Context Protocol (MCP) server that bridges Viber Bot API with your AI agent, enabling real-time conversations and command execution through Viber.
+A lightweight Model Context Protocol (MCP) server that focuses on deterministic automation. It powers multiple integrations inside this repository: Playwright-driven browsing, Brunas TMS tooling, BSS accounting helpers, and WhatsApp automation. The default `index.ts` entry point now exposes only generic tools so it can run without any Viber dependencies.
 
 ## Features
 
-- 💬 **Real-time Messaging**: Send and receive messages through Viber
-- 🌐 **Web Automation**: Control browsers with Playwright commands
-- 🤖 **AI Integration**: Connect to any AI agent or LLM
-- 🔗 **Webhook Support**: Receive Viber messages via webhooks
-- 🛠️ **Tool Execution**: Run shell commands and execute custom scripts
-- 📱 **Multi-user**: Support multiple Viber conversations simultaneously
+- 🌐 **Playwright Automation** – Navigate, click, type, capture screenshots, or wait for events directly from MCP tools.
+- 🛠️ **Shell/Command Execution** – Run controlled commands required by downstream adapters.
+- 🧱 **Composable Design** – Additional domain-specific servers (Brunas TMS, BSS accounting, WhatsApp poller) live alongside the core automation server.
+- ⚙️ **Headless Friendly** – Designed to run inside VS Code MCP tooling without extra services.
 
-## Architecture
+## Getting Started
 
-- **MCP Server**: Handles protocol communication with Claude/AI agents
-- **Viber Bot API**: Integrates with Viber's bot platform
-- **Playwright Executor**: Automates browser interactions
-- **Webhook Server**: Receives real-time messages from Viber
+1. **Install dependencies**
+   ```bash
+   npm install
+   git submodule update --init --recursive
+   ```
+2. **Build TypeScript sources**
+   ```bash
+   npm run build
+   ```
+3. **Run the default MCP server**
+   ```bash
+   npm start
+   ```
 
-## Prerequisites
-
-- Node.js 18+ and npm/yarn
-- Viber Business Account with Bot API access
-- Playwright (automatically installed)
-- MCP SDK (automatically installed)
-
-## Setup
-
-### 1. Install Dependencies
-
-```bash
-cd d:\dev\agent
-npm install
-git submodule update --init --recursive
-```
-
-The project depends on the `whatsapp-mcp` submodule for WhatsApp bridge files and MCP tooling.
-
-### 2. Build the Project
-
-```bash
-npm run build
-```
-
-### 3. Configure Viber Bot
-
-1. Go to [Viber Business Hub](https://www.viber.com/en/business/bot)
-2. Create or select your bot
-3. Get your Bot API Token
-4. Create a `.env` file (copy from `.env.example`):
-
-```bash
-VIBER_BOT_TOKEN=your_actual_bot_token_here
-WEBHOOK_PORT=3001
-```
-
-### 4. Set Up Webhook
-
-Your Viber bot needs to know where to send messages. You have two options:
-
-#### Option A: Use ngrok for local testing
-
-```bash
-# Install ngrok: https://ngrok.com/
-ngrok http 3001
-# You'll get a public URL like: https://xxx.ngrok.io
-```
-
-Then set the webhook in Viber Business Hub:
-```
-Webhook URL: https://xxx.ngrok.io/webhook/viber
-```
-
-#### Option B: Deploy to server
-
-Set the webhook to your server's public URL:
-```
-Webhook URL: https://your-domain.com/webhook/viber
-```
-
-## Usage
-
-### Run the MCP Server
-
-```bash
-npm run dev
-# or
-npm start
-```
-
-### Initialize MCP in VS Code
-
-The server is configured in `.vscode/mcp.json`. When you use Claude/Copilot:
-
-```
-You can now:
-- Send messages through Viber to your agent
-- Execute Playwright browser commands
-- Run system commands
-- Browse the web
-```
+Use `.vscode/mcp.json` to register the server with Copilot/Claude. Additional specialized servers (Brunas, BSS, WhatsApp) have their own entry points under `dist/` and can be started via the scripts in `package.json`.
 
 ## Available Tools
 
-### 1. send_viber_message
-Send a message to a Viber user
+### execute_playwright
+Run Playwright actions from your agent.
 
-```javascript
-{
-  "tool": "send_viber_message",
-  "user_id": "viber_user_id",
-  "message": "Hello from your agent!"
-}
-```
-
-### 2. execute_playwright
-Control browsers and automate web interactions
-
-```javascript
+```json
 {
   "tool": "execute_playwright",
   "action": "navigate",
@@ -125,129 +41,64 @@ Control browsers and automate web interactions
 }
 ```
 
-Available actions:
-- `navigate`: Navigate to a URL
-- `click`: Click an element
-- `type`: Type text into an element
-- `screenshot`: Take a screenshot
-- `get_title`: Get page title
-- `wait`: Wait for specified milliseconds
+Supported actions: `navigate`, `click`, `type`, `screenshot`, `get_title`, `wait`. Provide additional parameters (`selector`, `text`, `delay`) as needed.
 
-### 3. get_conversation_history
-Retrieve conversation history with a user
+### execute_command
+Execute a sanitized system command. Use sparingly and prefer dedicated integrations when possible.
 
-```javascript
-{
-  "tool": "get_conversation_history",
-  "user_id": "viber_user_id"
-}
-```
-
-### 4. execute_command
-Execute system commands (use with caution)
-
-```javascript
+```json
 {
   "tool": "execute_command",
-  "command": "ls",
-  "args": ["-la"]
+  "command": "dir",
+  "args": ["/b"]
 }
 ```
 
-## Example Workflow
+## Additional Entry Points
 
-1. User sends message via Viber: "What's the weather?"
-2. MCP Server receives webhook from Viber
-3. Message is sent to Claude/Agent
-4. Agent processes and responds with browser automation commands
-5. Playwright executes browser actions
-6. Response is sent back via Viber
+- `npm run start:brunas` – Launch the Brunas TMS MCP server.
+- `npm run start:bss` – Launch the BSS accounting MCP server.
+- `npm run start:poller` – Start the WhatsApp poller automation.
+
+These services share the same build artifacts (`dist/*.js`) produced by `npm run build`.
 
 ## Project Structure
 
 ```
 .
 ├── src/
-│   ├── index.ts          # Main MCP server implementation
-│   ├── viber.ts          # Viber Bot API integration
-│   ├── playwright.ts     # Playwright browser executor
-│   └── webhook.ts        # Express webhook server
+│   ├── index.ts          # Core automation MCP server
+│   ├── playwright.ts     # Playwright executor wrapper
+│   ├── brunas-*.ts       # Brunas TMS tooling
+│   ├── bss-*.ts          # BSS accounting tooling
+│   └── whatsapp-*.ts     # WhatsApp automations
 ├── dist/                 # Compiled JavaScript
-├── .env.example         # Environment variables template
-├── package.json         # Dependencies
-├── tsconfig.json        # TypeScript configuration
-└── .vscode/
-    └── mcp.json         # MCP server configuration
+├── .env.example          # Environment template
+├── .vscode/mcp.json      # MCP server registration
+└── whatsapp-mcp/         # WhatsApp bridge submodule
 ```
-
-## Development
-
-### Watch mode with auto-compilation
-
-```bash
-npm run watch
-```
-
-Then in another terminal:
-```bash
-npm start
-```
-
-### Debug with VS Code
-
-1. Press `F5` to start debugging
-2. Set breakpoints in TypeScript files
-3. Messages from Viber will trigger your breakpoints
 
 ## Environment Variables
 
-- `VIBER_BOT_TOKEN`: Your Viber bot API token (required)
-- `WEBHOOK_PORT`: Port for webhook server (default: 3001)
-- `WEBHOOK_URL`: Public URL for Viber webhooks
-- `DEBUG`: Enable debug logging (default: false)
+Create a `.env` file (based on `.env.example`) and add only the secrets you need. For example:
 
-## Security Considerations
+```
+BRUNAS_API_URL=https://example.com
+BRUNAS_API_USERNAME=...
+BRUNAS_API_PASSWORD=...
+```
 
-- ✅ Always use HTTPS for webhooks in production
-- ✅ Validate Viber webhook signatures
-- ✅ Don't commit `.env` files with real tokens
-- ✅ Use environment variables for sensitive data
-- ✅ Implement rate limiting for commands
-- ⚠️ Be cautious with `execute_command` - consider sandboxing
+Other integrations (BSS, WhatsApp) have their own credentials; leave values unset if you are not running that service.
 
 ## Troubleshooting
 
-### Webhook not receiving messages
-- Verify webhook URL is publicly accessible
-- Check Viber Bot API token is correct
-- Ensure firewall/ports allow incoming connections
-- Test with curl: `curl -X POST -H "Content-Type: application/json" -d '{"test":"data"}' https://your-url/webhook/viber`
-
-### Playwright errors
-- Ensure Playwright browser is installed: `npx playwright install chromium`
-- Check selector syntax (CSS selectors or XPath)
-- Verify page has loaded before taking actions
-
-### MCP connection issues
-- Check `.vscode/mcp.json` syntax
-- Verify `dist/index.js` exists (run `npm run build`)
-- Check Node.js version (need 18+)
-- Review server logs for errors
-
-## Next Steps
-
-1. **Add LLM Integration**: Connect to OpenAI, Claude, or other LLMs
-2. **Command Parser**: Create a command parser for natural language
-3. **Database**: Add message persistence with database
-4. **Advanced Keyboard**: Create custom Viber keyboards for rich UI
-5. **Analytics**: Track conversations and usage
+- **TypeScript build fails** – Run `npm install` to ensure dependencies exist, then `npm run build`.
+- **Playwright errors** – Install browsers via `npx playwright install chromium` and verify selectors.
+- **MCP connection issues** – Confirm `.vscode/mcp.json` points to the correct executable and that the server prints “Automation MCP Server started successfully”.
 
 ## Contributing
 
-Feel free to extend this server with:
-- Additional integrations (Slack, Discord, etc.)
-- More Playwright actions
-- Custom command handlers
+Contributions are welcome! Expand the automation surface, add new MCP tools, or plug in additional transport layers. Keep the default server dependency-free (no Viber runtime) so it remains easy to embed in other projects.
 - Database persistence
 - Authentication/authorization
 

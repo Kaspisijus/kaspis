@@ -35,36 +35,35 @@ Safety and reliability rules:
 
 ---
 
-# Viber Agent MCP Server
+# Automation MCP Server
 
-The project includes a custom MCP server that bridges Viber Bot API with AI agents. This allows:
-- Receiving messages from Viber users
+The default MCP entry point (`src/index.ts`) now provides a lightweight automation toolset without any chat-platform dependencies. It focuses on:
 - Executing Playwright browser commands
-- Running system commands
-- Managing conversations with persistence
+- Running tightly scoped system commands
+- Acting as a base layer for additional integrations (Brunas TMS, BSS accounting, WhatsApp poller)
 
-## Viber MCP Server Details
+## Server Details
 
-**Configuration**: `.vscode/mcp.json` - Contains server startup configuration
-**Source**: `src/` directory - TypeScript implementation
-**Documentation**: `.github/VIBER_MCP_GUIDE.md` - Complete development guide
+**Configuration**: `.vscode/mcp.json` – registers all available MCP servers
+**Source**: `src/` directory – TypeScript implementation
+**Documentation**: `.github/VIBER_MCP_GUIDE.md` – updated development guide
 
 ### Before Starting Development
 1. Install dependencies: `npm install`
-2. Copy `.env.example` to `.env` and set `VIBER_BOT_TOKEN`
+2. Copy `.env.example` to `.env` (fill in only the variables you need)
 3. Build: `npm run build`
-4. See README.md for full setup instructions
+4. Consult README.md for usage notes
 
 ### Server Capabilities
-- Tool: `send_viber_message` - Send messages to Viber users
-- Tool: `execute_playwright` - Browser automation (navigate, click, type, screenshot, etc.)
-- Tool: `get_conversation_history` - Retrieve user conversation history
-- Tool: `execute_command` - Execute system commands (with caution)
+- Tool: `execute_playwright` – Browser automation (navigate, click, type, screenshot, wait, get_title)
+- Tool: `execute_command` – Execute guarded system commands
 
-### MCP Server References
+Additional Node services (Brunas TMS, BSS accounting, WhatsApp poller) expose their own MCP tools via separate entry points in `dist/`.
+
+### MCP References
 - MCP Documentation: https://modelcontextprotocol.io/
 - TypeScript SDK: https://github.com/modelcontextprotocol/typescript-sdk
-- Viber Bot API: https://developers.viber.com/docs/api/rest-bot-api/
+- Playwright Docs: https://playwright.dev/
 
 ---
 
@@ -99,3 +98,27 @@ Tasks:
 2. <name> (<type>) — <placeName>, <address>
 ...
 ```
+
+---
+
+# Brunas TMS — Truck-Trailer Linking Rules
+
+When creating or editing a truck-trailer link, mirror the UI flow used in "Pridėti priekabą".
+
+Required flow:
+- For create: use `POST /api/v3/vehicle-trailers/`.
+- For edit: use `PUT /api/v3/vehicle-trailers/{id}/edit`.
+- Before create/edit, ALWAYS call intersecting precheck:
+	- `POST /api/v3/vehicle-trailers/trailers/{trailerId}/intersecting`
+	- Payload: `{ "dateFrom": "YYYY-MM-DD", "dateTo": null|"YYYY-MM-DD", "skipVehicleId": <vehicleId>, "skipTrailerId": null|<vehicleTrailerId> }`
+- For finish: use `POST /api/v3/vehicle-trailers/{id}/finish` with `dateTo`.
+- For delete: use `DELETE /api/v3/vehicle-trailers/{id}/delete`.
+
+Payload reliability rules:
+- `dateFrom` and `dateTo` must be serialized as `YYYY-MM-DD`.
+- `dateTo` may be `null` for open-ended links.
+- If resolved vehicle payload is missing `expedition`, set `expedition: false` before create/edit request.
+
+Behavior rules:
+- Include precheck result in operation output when possible.
+- If precheck finds intersecting links, show those conflicts to the user before continuing.

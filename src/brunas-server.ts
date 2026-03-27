@@ -47,6 +47,29 @@ function getClient(): BrunasApiClient {
   return brunasClient;
 }
 
+function unwrapApiData(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if (obj.data && typeof obj.data === "object") {
+      return obj.data as Record<string, unknown>;
+    }
+    return obj;
+  }
+  return {};
+}
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function assertIsoDate(value: unknown, fieldName: string): string {
+  if (typeof value !== "string" || !ISO_DATE_RE.test(value)) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `${fieldName} must be in YYYY-MM-DD format`
+    );
+  }
+  return value;
+}
+
 // ─── Filter-field documentation (embedded in tool descriptions) ──────
 
 const CARRIAGE_FIELDS_DOC = `Available filter fields for carriages:
@@ -74,8 +97,181 @@ const VEHICLE_FIELDS_DOC = `Available filter fields for vehicles:
   - manager (isAnyOf): transport manager
   - middleman (isAnyOf): license owner`;
 
-const DRIVER_FIELDS_DOC = `Driver search supports quick text filter (searches across name fields).
-Use quickFilter parameter for text search.`;
+const DRIVER_FIELDS_DOC = `Driver search (searchDriver behavior) is implemented through this tool.
+Use quickFilter parameter for text search across driver name fields.`;
+
+const CADENCY_FIELDS_DOC = `Available filter fields for cadencies (driver-vehicle timelines):
+  - status (isAnyOf): planning, current, ended
+  - vehicle (isAnyOf): array of vehicle IDs (numbers)
+  - driver (isAnyOf): array of driver IDs (numbers)
+  - dateFrom (onOrAfter/onOrBefore): loading/start date range
+  - dateTo (onOrAfter/onOrBefore): end date range
+  - company / fromCompany (contains): company name text search`;
+
+const driverFormFieldProperties = {
+  id: { type: "number" },
+  firstName: { type: "string" },
+  lastName: { type: "string" },
+  personalCode: { type: "string" },
+  birthday: { type: "string", description: "Date in YYYY-MM-DD format" },
+  nationality: { type: "string" },
+  language: { type: "string", description: "lt, en, de, fr, ru, pl" },
+  picture: { type: "string" },
+  agnumKey: { type: "string" },
+  finvaldaKey: { type: "string" },
+  email: { type: "string" },
+  login: { type: "string" },
+  password: { type: "string" },
+  status: { type: "boolean" },
+  tags: { type: "array", items: { type: "string" } },
+  employmentDate: { type: "string", description: "Date in YYYY-MM-DD format" },
+  dismissDate: { type: "string", description: "Date in YYYY-MM-DD format" },
+  phone: { type: "string" },
+  phonePersonal: { type: "string" },
+  homeAddress: { type: "string" },
+  declarationAddress: { type: "string" },
+  socialSecurityNumber: { type: "string" },
+  accountNumber: { type: "string" },
+  childrenInfo: { type: "string" },
+  finishedVehicle: { type: "boolean" },
+  truck: { type: "boolean" },
+  timeCardNumber: { type: "string" },
+};
+
+const cadencyFormFieldProperties = {
+  id: { type: ["number", "null"], description: "Cadency ID (leave null on create)" },
+  driverId: { type: "number", description: "Driver ID" },
+  vehicleId: { type: "number", description: "Vehicle ID" },
+  dateFrom: { type: "string", description: "Start date/time (YYYY-MM-DD or ISO 8601)" },
+  dateTo: { type: ["string", "null"], description: "Optional end date/time" },
+  dateLeaving: { type: ["string", "null"], description: "Optional leave date/time" },
+  dateReturn: { type: ["string", "null"], description: "Optional return date/time" },
+  middleman: { type: "object", description: "Full middleman object { id, name, ... }", additionalProperties: true },
+  middlemanId: { type: "number", description: "Shortcut: numeric middleman ID" },
+  middlemanFrom: { type: "object", description: "Middleman-from object", additionalProperties: true },
+  middlemanFromId: { type: "number", description: "Shortcut: numeric middleman-from ID" },
+};
+
+function normalizeCadencyDateTime(
+  value: unknown,
+  fieldName: string,
+  required: boolean
+): string | null {
+  if (value === undefined || value === null || value === "") {
+    if (required) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        `${fieldName} is required`
+      );
+    }
+    return null;
+  }
+
+  if (value instanceof Date) {
+    if (isNaN(value.getTime())) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        `${fieldName} must be a valid date`
+      );
+    }
+    return value.toISOString();
+  }
+
+  if (typeof value === "number") {
+    const date = new Date(value);
+    if (isNaN(date.getTime())) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        `${fieldName} must be a valid timestamp`
+      );
+    }
+    return date.toISOString();
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      if (required) {
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          `${fieldName} is required`
+        );
+      }
+      return null;
+    }
+
+    if (ISO_DATE_RE.test(trimmed)) {
+      return `${trimmed}T00:00:00Z`;
+    }
+
+    // Validate the string parses, but preserve the original format
+    // (keeps timezone offsets like +02:00 instead of converting to UTC)
+    const parsed = new Date(trimmed);
+    if (isNaN(parsed.getTime())) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        `${fieldName} must be YYYY-MM-DD or ISO 8601 date-time`
+      );
+    }
+    return trimmed;
+  }
+
+  throw new McpError(
+    ErrorCode.InvalidRequest,
+    `${fieldName} must be a string, number, or Date`
+  );
+}
+
+function normalizeMiddlemanInput(
+  value: unknown,
+  fieldName: string
+): Record<string, unknown> | null {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        `${fieldName} numeric ID must be finite`
+      );
+    }
+    return { id: value };
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        return JSON.parse(trimmed) as Record<string, unknown>;
+      } catch {
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          `${fieldName} JSON string could not be parsed`
+        );
+      }
+    }
+    const maybeId = Number(trimmed);
+    if (!Number.isNaN(maybeId)) {
+      return { id: maybeId };
+    }
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `${fieldName} must be an object or numeric ID`
+    );
+  }
+
+  if (typeof value === "object") {
+    return value as Record<string, unknown>;
+  }
+
+  throw new McpError(
+    ErrorCode.InvalidRequest,
+    `${fieldName} must be an object or numeric ID`
+  );
+}
 
 // ─── Shared JSON-Schema fragments ────────────────────────────────────
 
@@ -143,7 +339,13 @@ const tools = [
     description: `Search drivers in Brunas TMS.\n${DRIVER_FIELDS_DOC}`,
     inputSchema: {
       type: "object",
-      properties: datatableInputProperties,
+      properties: {
+        ...datatableInputProperties,
+        searchDriver: {
+          type: "string",
+          description: "Optional single text query alias. Internally mapped to quickFilter=[searchDriver].",
+        },
+      },
     },
   },
   {
@@ -178,8 +380,90 @@ const tools = [
     },
   },
   {
+    name: "create_driver",
+    description: "Create a new driver in Brunas TMS using the same full form payload shape as the UI (POST /api/v3/drivers/).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        data: {
+          type: "object",
+          properties: driverFormFieldProperties,
+          required: ["firstName", "lastName"],
+          additionalProperties: true,
+        },
+      },
+      required: ["data"],
+    },
+  },
+  {
+    name: "update_driver",
+    description: "Update an existing driver by ID with full-object semantics. Fetches current driver form, merges provided updates, then sends full payload via PUT /api/v3/drivers/{id}.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Driver ID" },
+        updates: {
+          type: "object",
+          properties: driverFormFieldProperties,
+          additionalProperties: true,
+        },
+      },
+      required: ["id", "updates"],
+    },
+  },
+  {
+    name: "cadency_search",
+    description: `Search driver-vehicle cadencies (timeline assignments) in Brunas TMS.\n${CADENCY_FIELDS_DOC}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...datatableInputProperties,
+        vehicleId: { type: "number", description: "Vehicle ID shortcut (adds vehicle filter)" },
+        vehicleNumber: { type: "string", description: "Vehicle plate number shortcut (resolves to ID via search_vehicles)" },
+        driverId: { type: "number", description: "Driver ID shortcut" },
+        driverName: { type: "string", description: "Driver name quick search (maps to quickFilter if provided)" },
+        status: { type: "string", description: "Single status filter: planning, current, or ended" },
+        statuses: { type: "array", items: { type: "string" }, description: "Multiple status values" },
+        dateFrom: { type: "string", description: "Start date >= filter (YYYY-MM-DD)" },
+        dateTo: { type: "string", description: "End date <= filter (YYYY-MM-DD)" },
+      },
+    },
+  },
+  {
+    name: "create_cadency",
+    description: "Create a new driver-vehicle cadency (timeline assignment) via POST /api/v3/vehicle-driver. Mirrors the Truckservice Timeline form (driverId, vehicleId, date range, middlemen).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        data: {
+          type: "object",
+          properties: cadencyFormFieldProperties,
+          required: ["driverId", "vehicleId", "dateFrom"],
+          additionalProperties: true,
+        },
+      },
+      required: ["data"],
+    },
+  },
+  {
+    name: "update_cadency",
+    description: "Update an existing cadency by ID with fetch-merge semantics (GET form, merge updates, PUT /api/v3/vehicle-driver/{id}).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "number", description: "Cadency ID" },
+        updates: {
+          type: "object",
+          properties: cadencyFormFieldProperties,
+          additionalProperties: true,
+        },
+      },
+      required: ["id", "updates"],
+    },
+  },
+  {
     name: "get_vehicle",
-    description: "Get full details of a single vehicle by ID.",
+    description: "Get full vehicle form data by ID (v3/form endpoint). Returns: id, name, type, model (string), vehicleVin, superstructure, manager, owner, license, tags, status, emissionType, tankCapacity, fuelRates, makeDate, leasingDate, etc. Used internally by update_vehicle for fetch-merge.",
     inputSchema: {
       type: "object",
       properties: {
@@ -197,6 +481,70 @@ const tools = [
         query: { type: "string", description: "Search query (partial plate number or name, e.g. 'nb', 'LBK608')" },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "search_vehicle_models",
+    description: "Search vehicle (truck) makes/models by name query. Vehicles have a single concatenated make+model record (e.g. 'Mercedes Benz Actros 1841'). Returns matching models with id and model name.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query (partial make/model name, e.g. 'merc', 'volvo')" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "get_vehicle_by_id",
+    description: `Get a single vehicle/truck by ID from Brunas TMS.
+Returns: id, name, number, model (string), vin, type, status, makeYear, managerId, managerName, euroClass, drivers, fuelConsumption, tankCapacity, owner, license, tags, leasingDate, leasingRedeemedDate, failuresCount, periodicTasksCount, etc.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "number", description: "Vehicle ID" },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "create_vehicle",
+    description: `Create a new vehicle/truck in Brunas TMS.
+type values: 0=VehicleCarrier, 1=Freezer, 2=Tent, 3=Car, 4=Container, 5=Other, 6=SimpleTruck, 7=Cistern.
+IMPORTANT: If type is not provided, do NOT guess — ask the user to choose from the list above before calling this tool.
+model: plain string — the make/model name (e.g. "Mercedes Benz 1841"). Use search_vehicle_models to find valid names.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        vehicleNumber: { type: "string", description: "Vehicle plate number (e.g. 'ABC123')" },
+        vehicleModel: { type: "string", description: "Model name string (e.g. 'Daf XF', 'Mercedes Benz Actros 1841')" },
+        type: { type: "number", description: "Vehicle type: 0=VehicleCarrier, 1=Freezer, 2=Tent, 3=Car, 4=Container, 5=Other, 6=SimpleTruck, 7=Cistern" },
+        makeDate: { type: "string", description: "Manufacturing date (YYYY-MM-DD)" },
+        registrationDate: { type: "string", description: "Registration date (YYYY-MM-DD)" },
+        vin: { type: "string", description: "VIN code (optional)" },
+        status: { type: "number", description: "Status: 0=Active (default), 1=Disassembled, 2=Sold, 3=ReRegistered, 4=Temp, 5=Unexploited, 9=Deleted" },
+      },
+      required: ["vehicleNumber", "vehicleModel", "type"],
+    },
+  },
+  {
+    name: "update_vehicle",
+    description: `Update an existing vehicle/truck in Brunas TMS by ID. Automatically fetches the current vehicle data and merges with provided fields (only overrides what you pass).
+type values: 0=VehicleCarrier, 1=Freezer, 2=Tent, 3=Car, 4=Container, 5=Other, 6=SimpleTruck, 7=Cistern.
+status values: 0=Active, 1=Disassembled, 2=Sold, 3=ReRegistered, 4=Temp, 5=Unexploited, 9=Deleted.
+model: plain string — the make/model name (e.g. "Daf XF"). Use search_vehicle_models to find valid names.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "number", description: "Vehicle ID to update" },
+        number: { type: "string", description: "Vehicle plate number" },
+        vehicleModel: { type: "string", description: "Model name string (e.g. 'Daf XF', 'Mercedes Benz Actros 1841')" },
+        type: { type: "number", description: "Vehicle type: 0=VehicleCarrier, 1=Freezer, 2=Tent, 3=Car, 4=Container, 5=Other, 6=SimpleTruck, 7=Cistern" },
+        status: { type: "number", description: "Status: 0=Active, 1=Disassembled, 2=Sold, 3=ReRegistered, 4=Temp, 5=Unexploited, 9=Deleted" },
+        vin: { type: "string", description: "VIN code" },
+        makeDate: { type: "string", description: "Manufacturing date (YYYY-MM-DD)" },
+        registrationDate: { type: "string", description: "Registration date (YYYY-MM-DD)" },
+      },
+      required: ["id"],
     },
   },
   {
@@ -310,7 +658,7 @@ type: object with id and type name (from search_superstructure_models).`,
   },
   {
     name: "update_trailer",
-    description: `Update an existing trailer in Brunas TMS by ID. Send the full trailer payload.
+    description: `Update an existing trailer in Brunas TMS by ID. Automatically fetches the current trailer data and merges with provided fields (only overrides what you pass).
 trailerType values: 0=Autovežis (Autocarrier), 1=Šaldytuvas (Fridge), 2=Tentas (Tilt/Tent), 3=Konteineris (Container), 4=Kita/pagalbinės (Other/Auxiliary), 5=Cisterna (Tanker).
 model: object with id and model name (from search_superstructure_makes).
 type: object with id and type name (from search_superstructure_models).`,
@@ -334,6 +682,85 @@ type: object with id and type name (from search_superstructure_models).`,
         leasingRedeemedDate: { type: "string", description: "Leasing redeemed date (YYYY-MM-DD, optional)" },
       },
       required: ["id"],
+    },
+  },
+  {
+    name: "hook_trailer_to_vehicle",
+    description: `Create a truck-trailer link (same flow as "Pridėti priekabą" in vehicle detail).
+Uses POST /api/v3/vehicle-trailers/ with vehicle/trailer resolved from IDs.
+dateFrom is required in YYYY-MM-DD format. dateTo is optional (open-ended link).`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        vehicleId: { type: "number", description: "Vehicle ID" },
+        trailerId: { type: "number", description: "Trailer ID" },
+        dateFrom: { type: "string", description: "Link start date (YYYY-MM-DD)" },
+        dateTo: { type: "string", description: "Optional link end date (YYYY-MM-DD)" },
+      },
+      required: ["vehicleId", "trailerId", "dateFrom"],
+    },
+  },
+  {
+    name: "edit_vehicle_trailer_link",
+    description: `Edit an existing truck-trailer link.
+Uses PUT /api/v3/vehicle-trailers/{id}/edit with fetch-merge behavior.
+Pass only fields you want to change; IDs are resolved to full objects internally.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        vehicleTrailerId: { type: "number", description: "Vehicle-trailer link ID" },
+        vehicleId: { type: "number", description: "Optional replacement vehicle ID" },
+        trailerId: { type: "number", description: "Optional replacement trailer ID" },
+        dateFrom: { type: "string", description: "Optional replacement start date (YYYY-MM-DD)" },
+        dateTo: { type: "string", description: "Optional replacement end date (YYYY-MM-DD or null)" },
+      },
+      required: ["vehicleTrailerId"],
+    },
+  },
+  {
+    name: "finish_vehicle_trailer_link",
+    description: "Finish an active truck-trailer link by setting end date (POST /api/v3/vehicle-trailers/{id}/finish).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        vehicleTrailerId: { type: "number", description: "Vehicle-trailer link ID" },
+        dateTo: { type: "string", description: "End date (YYYY-MM-DD)" },
+      },
+      required: ["vehicleTrailerId", "dateTo"],
+    },
+  },
+  {
+    name: "delete_vehicle_trailer_link",
+    description: "Delete a truck-trailer link (DELETE /api/v3/vehicle-trailers/{id}/delete).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        vehicleTrailerId: { type: "number", description: "Vehicle-trailer link ID" },
+      },
+      required: ["vehicleTrailerId"],
+    },
+  },
+  {
+    name: "normalize_trailer_numbers",
+    description: `Bulk normalize trailer plate numbers by removing all spaces.
+This tool fetches each trailer and sends a full merged payload on update (safe for endpoints that reject partial payloads).
+By default it stops on first failure and returns detailed failure info.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        pageSize: {
+          type: "number",
+          description: "Pagination size for trailer scan (default 200)",
+        },
+        failFast: {
+          type: "boolean",
+          description: "Stop on first failed update (default true)",
+        },
+        dryRun: {
+          type: "boolean",
+          description: "If true, only scans and returns candidates without updating",
+        },
+      },
     },
   },
   // ── Vehicle Service ─────────────────────────────────────────
@@ -445,12 +872,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // ── Find drivers ─────────────────────────────────────────
       case "find_drivers": {
+        const quickFilter = args.quickFilter as string[] | undefined;
+        const searchDriver = args.searchDriver as string | undefined;
+        const effectiveQuickFilter = quickFilter ?? (
+          typeof searchDriver === "string" && searchDriver.trim()
+            ? [searchDriver.trim()]
+            : undefined
+        );
         const data = await client.findDrivers(
           (args.filters as Array<{ field: string; value: string | string[] | number; operator: string }>) ?? [],
           (args.page as number) ?? 0,
           (args.pageSize as number) ?? 25,
           args.sort as Array<{ field: string; sort: "asc" | "desc" | null }> | undefined,
-          args.quickFilter as string[] | undefined
+          effectiveQuickFilter
         );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
@@ -495,6 +929,258 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      // ── Create driver ────────────────────────────────────────
+      case "create_driver": {
+        const payload = args.data as Record<string, unknown>;
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+          throw new McpError(ErrorCode.InvalidRequest, "data object is required");
+        }
+        const firstName = payload.firstName;
+        const lastName = payload.lastName;
+        if (typeof firstName !== "string" || !firstName.trim()) {
+          throw new McpError(ErrorCode.InvalidRequest, "data.firstName is required");
+        }
+        if (typeof lastName !== "string" || !lastName.trim()) {
+          throw new McpError(ErrorCode.InvalidRequest, "data.lastName is required");
+        }
+        const data = await client.createDriver(payload);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      // ── Update driver ────────────────────────────────────────
+      case "update_driver": {
+        const rawId = args.id;
+        if (rawId === undefined || rawId === null || rawId === "") {
+          throw new McpError(ErrorCode.InvalidRequest, "id is required");
+        }
+
+        const updates = args.updates as Record<string, unknown>;
+        if (!updates || typeof updates !== "object" || Array.isArray(updates)) {
+          throw new McpError(ErrorCode.InvalidRequest, "updates object is required");
+        }
+
+        const driverId = String(rawId);
+        const existingResponse = await client.getDriver(driverId);
+        const existing = unwrapApiData(existingResponse);
+
+        const payload: Record<string, unknown> = {
+          ...existing,
+          ...updates,
+          id: existing.id ?? rawId,
+        };
+
+        const data = await client.updateDriver(driverId, payload);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "cadency_search": {
+        let filters = (args.filters as Array<{ field: string; value: string | string[] | number | number[]; operator: string }>) ?? [];
+        let quickFilter = args.quickFilter as string[] | undefined;
+        const page = (args.page as number) ?? 0;
+        const pageSize = (args.pageSize as number) ?? 25;
+        const sort = args.sort as Array<{ field: string; sort: "asc" | "desc" | null }> | undefined;
+
+        const vehicleIdArg = args.vehicleId as number | undefined;
+        if (typeof vehicleIdArg === "number" && Number.isFinite(vehicleIdArg)) {
+          filters = [
+            ...filters,
+            { field: "vehicle", operator: "isAnyOf", value: [vehicleIdArg] },
+          ];
+        }
+
+        const vehicleNumberRaw = args.vehicleNumber as string | undefined;
+        const normalizedVehicle = vehicleNumberRaw?.replace(/\s+/g, "").toUpperCase();
+        if (normalizedVehicle) {
+          const searchResult = await client.searchActiveVehicles(normalizedVehicle) as { data?: Array<{ id: number; number: string }> };
+          const vehicles = searchResult.data ?? [];
+          const match = vehicles.find((v) => v.number.replace(/\s+/g, "").toUpperCase() === normalizedVehicle) ?? vehicles[0];
+          if (!match) {
+            return {
+              content: [{ type: "text" as const, text: `Vehicle "${vehicleNumberRaw}" not found.` }],
+            };
+          }
+          filters = [
+            ...filters,
+            { field: "vehicle", operator: "isAnyOf", value: [match.id] },
+          ];
+        }
+
+        const driverIdArg = args.driverId as number | undefined;
+        if (typeof driverIdArg === "number" && Number.isFinite(driverIdArg)) {
+          filters = [
+            ...filters,
+            { field: "driver", operator: "isAnyOf", value: [driverIdArg] },
+          ];
+        }
+
+        const driverName = args.driverName as string | undefined;
+        if (driverName && (!quickFilter || quickFilter.length === 0)) {
+          quickFilter = [driverName];
+        }
+
+        const statuses: string[] = [];
+        const rawStatus = args.status as string | undefined;
+        if (rawStatus) statuses.push(rawStatus);
+        const rawStatuses = args.statuses as string[] | undefined;
+        if (Array.isArray(rawStatuses)) {
+          for (const st of rawStatuses) {
+            if (typeof st === "string") statuses.push(st);
+          }
+        }
+        if (statuses.length) {
+          filters = [
+            ...filters,
+            { field: "status", operator: "isAnyOf", value: statuses },
+          ];
+        }
+
+        const rangeStart = args.dateFrom as string | undefined;
+        if (rangeStart) {
+          filters = [
+            ...filters,
+            { field: "dateFrom", operator: "onOrAfter", value: assertIsoDate(rangeStart, "dateFrom") },
+          ];
+        }
+        const rangeEnd = args.dateTo as string | undefined;
+        if (rangeEnd) {
+          filters = [
+            ...filters,
+            { field: "dateTo", operator: "onOrBefore", value: assertIsoDate(rangeEnd, "dateTo") },
+          ];
+        }
+
+        const data = await client.findCadencies(
+          filters,
+          page,
+          pageSize,
+          sort,
+          quickFilter
+        );
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "create_cadency": {
+        const dataArg = args.data as Record<string, unknown>;
+        if (!dataArg || typeof dataArg !== "object" || Array.isArray(dataArg)) {
+          throw new McpError(ErrorCode.InvalidRequest, "data object is required");
+        }
+
+        const driverId = Number(dataArg.driverId);
+        const vehicleId = Number(dataArg.vehicleId);
+        if (!Number.isFinite(driverId)) {
+          throw new McpError(ErrorCode.InvalidRequest, "data.driverId must be a number");
+        }
+        if (!Number.isFinite(vehicleId)) {
+          throw new McpError(ErrorCode.InvalidRequest, "data.vehicleId must be a number");
+        }
+
+        const dateFromIso = normalizeCadencyDateTime(dataArg.dateFrom, "data.dateFrom", true);
+        const dateToIso = normalizeCadencyDateTime(dataArg.dateTo, "data.dateTo", false);
+        const dateLeavingIso = normalizeCadencyDateTime(dataArg.dateLeaving, "data.dateLeaving", false);
+        const dateReturnIso = normalizeCadencyDateTime(dataArg.dateReturn, "data.dateReturn", false);
+        const middleman = normalizeMiddlemanInput(dataArg.middleman ?? dataArg.middlemanId, "data.middleman");
+        const middlemanFrom = normalizeMiddlemanInput(
+          dataArg.middlemanFrom ?? dataArg.middlemanFromId,
+          "data.middlemanFrom"
+        );
+
+        const payload: Record<string, unknown> = {
+          ...dataArg,
+          id: dataArg.id ?? null,
+          driverId,
+          vehicleId,
+          dateFrom: dateFromIso,
+          dateTo: dateToIso,
+          dateLeaving: dateLeavingIso,
+          dateReturn: dateReturnIso,
+          middleman,
+          middlemanFrom,
+        };
+        delete payload.middlemanId;
+        delete payload.middlemanFromId;
+
+        const data = await client.createCadency(payload);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "update_cadency": {
+        const cadencyId = args.id as number;
+        if (!Number.isFinite(cadencyId)) {
+          throw new McpError(ErrorCode.InvalidRequest, "id is required and must be a number");
+        }
+
+        const updates = args.updates as Record<string, unknown>;
+        if (!updates || typeof updates !== "object" || Array.isArray(updates)) {
+          throw new McpError(ErrorCode.InvalidRequest, "updates object is required");
+        }
+
+        const existingResponse = await client.getCadency(cadencyId);
+        const existing = unwrapApiData(existingResponse);
+        const payload: Record<string, unknown> = {
+          ...existing,
+          ...updates,
+          id: existing.id ?? cadencyId,
+        };
+
+        if (updates.driverId !== undefined) {
+          const driverId = Number(updates.driverId);
+          if (!Number.isFinite(driverId)) {
+            throw new McpError(ErrorCode.InvalidRequest, "updates.driverId must be a number");
+          }
+          payload.driverId = driverId;
+        }
+
+        if (updates.vehicleId !== undefined) {
+          const vehicleId = Number(updates.vehicleId);
+          if (!Number.isFinite(vehicleId)) {
+            throw new McpError(ErrorCode.InvalidRequest, "updates.vehicleId must be a number");
+          }
+          payload.vehicleId = vehicleId;
+        }
+
+        if (updates.dateFrom !== undefined) {
+          payload.dateFrom = normalizeCadencyDateTime(updates.dateFrom, "updates.dateFrom", true);
+        }
+        if (updates.dateTo !== undefined) {
+          payload.dateTo = normalizeCadencyDateTime(updates.dateTo, "updates.dateTo", false);
+        }
+        if (updates.dateLeaving !== undefined) {
+          payload.dateLeaving = normalizeCadencyDateTime(updates.dateLeaving, "updates.dateLeaving", false);
+        }
+        if (updates.dateReturn !== undefined) {
+          payload.dateReturn = normalizeCadencyDateTime(updates.dateReturn, "updates.dateReturn", false);
+        }
+
+        if ("middleman" in updates || "middlemanId" in updates) {
+          payload.middleman = normalizeMiddlemanInput(
+            updates.middleman ?? updates.middlemanId,
+            "updates.middleman"
+          );
+        }
+        if ("middlemanFrom" in updates || "middlemanFromId" in updates) {
+          payload.middlemanFrom = normalizeMiddlemanInput(
+            updates.middlemanFrom ?? updates.middlemanFromId,
+            "updates.middlemanFrom"
+          );
+        }
+
+        delete payload.middlemanId;
+        delete payload.middlemanFromId;
+
+        const data = await client.updateCadency(cadencyId, payload);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
       // ── Get single vehicle ───────────────────────────────────
       case "get_vehicle": {
         const id = args.id as string;
@@ -514,6 +1200,120 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidRequest, "query is required");
         }
         const data = await client.searchActiveVehicles(query);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      // ── Search vehicle models ─────────────────────────────────
+      case "search_vehicle_models": {
+        const query = args.query as string;
+        if (!query) {
+          throw new McpError(ErrorCode.InvalidRequest, "query is required");
+        }
+        const data = await client.searchVehicleModels(query);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      // ── Get single vehicle by ID (v2) ────────────────────────
+      case "get_vehicle_by_id": {
+        const id = args.id as number;
+        if (!id) {
+          throw new McpError(ErrorCode.InvalidRequest, "id is required");
+        }
+        const data = await client.getVehicleById(id);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      // ── Create vehicle ────────────────────────────────────────
+      case "create_vehicle": {
+        const vehicleNumber = args.vehicleNumber as string;
+        const vehicleModel = (args.vehicleModel as string) || null;
+        const vehicleType = args.type as number;
+        if (!vehicleNumber || vehicleType === undefined) {
+          throw new McpError(ErrorCode.InvalidRequest, "vehicleNumber and type are required");
+        }
+        // Create with model=null (API rejects unknown model strings with 500)
+        const createPayload: Record<string, unknown> = {
+          id: null,
+          name: "",
+          vehicleNumber: vehicleNumber.replace(/\s+/g, ""),
+          model: null,
+          type: vehicleType,
+          status: (args.status as number) ?? 0,
+          makeDate: (args.makeDate as string) ?? null,
+          registrationDate: (args.registrationDate as string) ?? null,
+          vehicleVin: (args.vin as string) ?? null,
+          superstructure: { model: null, type: null, firstFloorFingernail: 0, secondFloorFingernail: 0 },
+          tags: [],
+          owner: null,
+          license: null,
+          licenseNr: null,
+          manager: null,
+          managerId: null,
+          phone: null,
+          emissionType: 1,
+          co2EmissionClass: 0,
+          engineType: 0,
+          fuelType: 0,
+          fuelCardPin: null,
+          tankCapacity: null,
+          telemetrySource: null,
+          locationFromApp: false,
+          rivileDepartmentCode: "",
+          rivileCostCenterCode: "",
+          superStructureMakeDate: null,
+          cabinType: 0,
+          fuelRateSummer: null,
+          fuelRateWinter: null,
+          leasingDate: null,
+          leasingRedeemedDate: null,
+        };
+        const createResult = await client.createVehicle(createPayload);
+        const created = ((createResult as Record<string, unknown>).data ?? createResult) as Record<string, unknown>;
+        const newId = created.id as number;
+
+        // If model was provided, update the vehicle to set it (uses fetch-merge)
+        if (vehicleModel && newId) {
+          const existingResponse = await client.getVehicle(String(newId));
+          const existing = ((existingResponse as Record<string, unknown>).data ?? existingResponse) as Record<string, unknown>;
+          const updatePayload = { ...existing, id: newId, model: vehicleModel };
+          const updateResult = await client.updateVehicle(newId, updatePayload);
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(updateResult, null, 2) }],
+          };
+        }
+
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(createResult, null, 2) }],
+        };
+      }
+
+      // ── Update vehicle ────────────────────────────────────────
+      case "update_vehicle": {
+        const vehicleId = args.id as number;
+        if (!vehicleId) {
+          throw new McpError(ErrorCode.InvalidRequest, "id is required");
+        }
+
+        // Fetch existing vehicle (v3/form) to preserve all fields
+        const existingVehicleResponse = await client.getVehicle(String(vehicleId));
+        const existingVehicle = ((existingVehicleResponse as Record<string, unknown>).data ?? existingVehicleResponse) as Record<string, unknown>;
+
+        // Start from existing data, override only provided fields
+        const vehiclePayload: Record<string, unknown> = { ...existingVehicle, id: vehicleId };
+        if (args.number !== undefined) vehiclePayload.number = (args.number as string).replace(/\s+/g, "");
+        if (args.vehicleModel !== undefined) vehiclePayload.model = args.vehicleModel as string;
+        if (args.type !== undefined) vehiclePayload.type = args.type;
+        if (args.status !== undefined) vehiclePayload.status = args.status;
+        if (args.vin !== undefined) vehiclePayload.vin = args.vin;
+        if (args.makeDate !== undefined) vehiclePayload.makeDate = args.makeDate;
+        if (args.registrationDate !== undefined) vehiclePayload.registrationDate = args.registrationDate;
+        const data = await client.updateVehicle(vehicleId, vehiclePayload);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
         };
@@ -656,6 +1456,259 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const data = await client.updateTrailer(trailerId, payload);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      // ── Hook trailer to vehicle ────────────────────────────
+      case "hook_trailer_to_vehicle": {
+        const vehicleId = args.vehicleId as number;
+        const trailerId = args.trailerId as number;
+        if (!vehicleId || !trailerId) {
+          throw new McpError(ErrorCode.InvalidRequest, "vehicleId and trailerId are required");
+        }
+
+        const dateFrom = assertIsoDate(args.dateFrom, "dateFrom");
+        const dateToArg = args.dateTo as string | null | undefined;
+        if (dateToArg !== undefined && dateToArg !== null) {
+          assertIsoDate(dateToArg, "dateTo");
+        }
+
+        const vehicleResponse = await client.getVehicle(String(vehicleId));
+        const trailerResponse = await client.getTrailer(trailerId);
+        const vehicle = unwrapApiData(vehicleResponse);
+        if (vehicle.expedition === undefined) {
+          vehicle.expedition = false;
+        }
+        const trailer = unwrapApiData(trailerResponse);
+
+        const payload: Record<string, unknown> = {
+          vehicle,
+          trailer,
+          dateFrom,
+          dateTo: dateToArg ?? null,
+        };
+
+        const precheck = await client.getIntersectingVehicleTrailers(trailerId, {
+          dateFrom,
+          dateTo: dateToArg ?? null,
+          skipVehicleId: vehicleId,
+          skipTrailerId: null,
+        });
+
+        const data = await client.createVehicleTrailer(payload);
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ precheck, data }, null, 2),
+          }],
+        };
+      }
+
+      // ── Edit vehicle-trailer link ──────────────────────────
+      case "edit_vehicle_trailer_link": {
+        const vehicleTrailerId = args.vehicleTrailerId as number;
+        if (!vehicleTrailerId) {
+          throw new McpError(ErrorCode.InvalidRequest, "vehicleTrailerId is required");
+        }
+
+        const existingResponse = await client.getVehicleTrailer(vehicleTrailerId);
+        const existing = unwrapApiData(existingResponse);
+        const payload: Record<string, unknown> = { ...existing };
+
+        if (args.vehicleId !== undefined) {
+          const vehicleId = args.vehicleId as number;
+          if (!vehicleId) {
+            throw new McpError(ErrorCode.InvalidRequest, "vehicleId must be a valid number");
+          }
+          const vehicleResponse = await client.getVehicle(String(vehicleId));
+          const vehicle = unwrapApiData(vehicleResponse);
+          if (vehicle.expedition === undefined) {
+            vehicle.expedition = false;
+          }
+          payload.vehicle = vehicle;
+        }
+
+        if (args.trailerId !== undefined) {
+          const trailerId = args.trailerId as number;
+          if (!trailerId) {
+            throw new McpError(ErrorCode.InvalidRequest, "trailerId must be a valid number");
+          }
+          const trailerResponse = await client.getTrailer(trailerId);
+          payload.trailer = unwrapApiData(trailerResponse);
+        }
+
+        if (args.dateFrom !== undefined) {
+          payload.dateFrom = assertIsoDate(args.dateFrom, "dateFrom");
+        }
+
+        if (args.dateTo !== undefined) {
+          const dateTo = args.dateTo as string | null;
+          if (dateTo !== null) {
+            payload.dateTo = assertIsoDate(dateTo, "dateTo");
+          } else {
+            payload.dateTo = null;
+          }
+        }
+
+        const effectiveTrailer = payload.trailer as Record<string, unknown> | undefined;
+        const effectiveVehicle = payload.vehicle as Record<string, unknown> | undefined;
+        const effectiveTrailerId = Number(effectiveTrailer?.id);
+        const effectiveVehicleId = Number(effectiveVehicle?.id);
+        const effectiveDateFrom = payload.dateFrom as string;
+        const effectiveDateTo = (payload.dateTo as string | null | undefined) ?? null;
+
+        if (!effectiveTrailerId || !effectiveVehicleId || !effectiveDateFrom) {
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            "Unable to resolve trailer, vehicle, or dateFrom for intersecting precheck"
+          );
+        }
+
+        const precheck = await client.getIntersectingVehicleTrailers(effectiveTrailerId, {
+          dateFrom: effectiveDateFrom,
+          dateTo: effectiveDateTo,
+          skipVehicleId: effectiveVehicleId,
+          skipTrailerId: vehicleTrailerId,
+        });
+
+        const data = await client.editVehicleTrailer(vehicleTrailerId, payload);
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ precheck, data }, null, 2),
+          }],
+        };
+      }
+
+      // ── Finish vehicle-trailer link ────────────────────────
+      case "finish_vehicle_trailer_link": {
+        const vehicleTrailerId = args.vehicleTrailerId as number;
+        if (!vehicleTrailerId) {
+          throw new McpError(ErrorCode.InvalidRequest, "vehicleTrailerId is required");
+        }
+
+        const dateTo = assertIsoDate(args.dateTo, "dateTo");
+        const data = await client.finishVehicleTrailer(vehicleTrailerId, { dateTo });
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      // ── Delete vehicle-trailer link ────────────────────────
+      case "delete_vehicle_trailer_link": {
+        const vehicleTrailerId = args.vehicleTrailerId as number;
+        if (!vehicleTrailerId) {
+          throw new McpError(ErrorCode.InvalidRequest, "vehicleTrailerId is required");
+        }
+
+        const data = await client.deleteVehicleTrailer(vehicleTrailerId);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        };
+      }
+
+      case "normalize_trailer_numbers": {
+        const pageSize = Math.max(1, ((args.pageSize as number) ?? 200));
+        const failFast = (args.failFast as boolean) ?? true;
+        const dryRun = (args.dryRun as boolean) ?? false;
+
+        const candidates: Array<{ id: number; from: string; to: string }> = [];
+        let page = 0;
+        let total = 0;
+
+        while (true) {
+          const listResponse = await client.findTrailers(
+            [],
+            page,
+            pageSize,
+            [{ field: "id", sort: "asc" }]
+          ) as { data?: Array<{ id: number; number: string | null }> };
+
+          const rows = listResponse.data ?? [];
+          total += rows.length;
+
+          for (const row of rows) {
+            const from = String(row.number ?? "");
+            const to = from.replace(/\s+/g, "");
+            if (to !== from) {
+              candidates.push({ id: row.id, from, to });
+            }
+          }
+
+          if (rows.length < pageSize) break;
+          page += 1;
+        }
+
+        if (dryRun) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: JSON.stringify({
+                mode: "dry-run",
+                total,
+                candidates: candidates.length,
+                sample: candidates.slice(0, 25),
+              }, null, 2),
+            }],
+          };
+        }
+
+        let updated = 0;
+        const failures: Array<{
+          id: number;
+          from: string;
+          to: string;
+          status: number | null;
+          message: string;
+          response: unknown;
+        }> = [];
+
+        for (const candidate of candidates) {
+          try {
+            const existingResponse = await client.getTrailer(candidate.id);
+            const existing = unwrapApiData(existingResponse);
+            const payload: Record<string, unknown> = {
+              ...existing,
+              id: candidate.id,
+              number: candidate.to,
+            };
+
+            await client.updateTrailer(candidate.id, payload);
+            updated += 1;
+          } catch (error: unknown) {
+            const err = error as {
+              message?: string;
+              response?: { status?: number; data?: unknown };
+            };
+            const failure = {
+              id: candidate.id,
+              from: candidate.from,
+              to: candidate.to,
+              status: err.response?.status ?? null,
+              message: err.message ?? String(error),
+              response: err.response?.data ?? null,
+            };
+            failures.push(failure);
+
+            if (failFast) {
+              break;
+            }
+          }
+        }
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              mode: "update",
+              total,
+              candidates: candidates.length,
+              updated,
+              failed: failures.length,
+              failFast,
+              failures,
+            }, null, 2),
+          }],
         };
       }
 

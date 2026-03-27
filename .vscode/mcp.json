@@ -10,13 +10,7 @@
 			],
 			"type": "stdio"
 		},
-		"viber-agent": {
-			"command": "node",
-			"args": [
-				"dist/index.js"
-			],
-			"type": "stdio"
-		},
+
 		"playwright": {
 			"command": "npx",
 			"args": [
