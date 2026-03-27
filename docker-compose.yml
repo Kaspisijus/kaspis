@@ -31,7 +31,7 @@ services:
       # Forward user email to backend API
       - ENABLE_FORWARD_USER_INFO_HEADERS=true
       # Default model
-      - DEFAULT_MODELS=brunas-agent
+      - DEFAULT_MODELS=mantas
       # Debug logging
       - GLOBAL_LOG_LEVEL=DEBUG
     volumes:

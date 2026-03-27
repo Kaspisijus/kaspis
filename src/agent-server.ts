@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Brunas AI Agent HTTP Server
+ * Mantas HTTP Server
  *
  * Exposes:
  *  - Auth endpoints (Brunas login, session, client selection)
@@ -1290,11 +1290,11 @@ app.get("/v1/models", (req, res) => {
     object: "list",
     data: [
       {
-        id: "brunas-agent",
+        id: "mantas",
         object: "model",
         created: Math.floor(Date.now() / 1000),
         owned_by: "brunas",
-        name: "Brunas AI Agent",
+        name: "Mantas",
       },
     ],
   });
@@ -1337,7 +1337,7 @@ app.post("/v1/chat/completions", async (req, res) => {
 // ─── Start ───────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
-  console.log(`Brunas AI Agent server running on port ${PORT}`);
+  console.log(`Mantas server running on port ${PORT}`);
   console.log(`Login page: http://localhost:${PORT}/auth/login`);
   console.log(`API key for Open WebUI: ${AGENT_API_KEY}`);
 });

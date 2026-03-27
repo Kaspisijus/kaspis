@@ -37,16 +37,15 @@ Safety and reliability rules:
 
 # Automation MCP Server
 
-The default MCP entry point (`src/index.ts`) now provides a lightweight automation toolset without any chat-platform dependencies. It focuses on:
-- Executing Playwright browser commands
-- Running tightly scoped system commands
-- Acting as a base layer for additional integrations (Brunas TMS, BSS accounting, WhatsApp poller)
+This repo contains two main runtime modes:
 
-## Server Details
+1. **Local MCP servers** — stdio-based servers for VS Code Copilot/Claude (`src/index.ts`, `src/brunas-server.ts`, `src/bss-server.ts`, `src/whatsapp-poller.ts`).
+2. **Live agent HTTP server** — `src/agent-server.ts`, deployed at **https://agent.brunas.lt** with Open WebUI as the chat frontend.
+
+## Local MCP Details
 
 **Configuration**: `.vscode/mcp.json` – registers all available MCP servers
 **Source**: `src/` directory – TypeScript implementation
-**Documentation**: `.github/VIBER_MCP_GUIDE.md` – updated development guide
 
 ### Before Starting Development
 1. Install dependencies: `npm install`
@@ -54,11 +53,72 @@ The default MCP entry point (`src/index.ts`) now provides a lightweight automati
 3. Build: `npm run build`
 4. Consult README.md for usage notes
 
-### Server Capabilities
+### Local Server Capabilities
 - Tool: `execute_playwright` – Browser automation (navigate, click, type, screenshot, wait, get_title)
 - Tool: `execute_command` – Execute guarded system commands
 
 Additional Node services (Brunas TMS, BSS accounting, WhatsApp poller) expose their own MCP tools via separate entry points in `dist/`.
+
+## Live Deployment — agent.brunas.lt
+
+### Architecture
+- **Hetzner CX32** VPS (4 vCPU / 8 GB RAM), Ubuntu 24.04, IP `167.235.226.121`
+- **Docker Compose** with 4 services: `agent`, `open-webui`, `nginx`, `certbot`
+- **SSL**: Let's Encrypt cert for `agent.brunas.lt` (auto-renewal via certbot)
+- **DNS**: `agent.brunas.lt` → `167.235.226.121`
+- **SSH**: `ssh -i D:\inspiron_priv root@167.235.226.121`
+- **Deployed files**: `/opt/agent/` on the server
+
+### Services
+
+| Service | Image / Build | Port | Role |
+|---------|--------------|------|------|
+| `agent` | Built from `Dockerfile` | 3002 (internal) | Express API server — auth, OpenAI-compatible `/v1/chat/completions`, tool execution loop |
+| `open-webui` | `ghcr.io/open-webui/open-webui:main` | 8080 (internal) | Chat UI frontend, connects to agent as its OpenAI backend |
+| `nginx` | `nginx:alpine` | 80, 443 (exposed) | Reverse proxy, SSL termination, `auth_request` session validation |
+| `certbot` | `certbot/certbot` | — | SSL cert management (profile-gated, run manually) |
+
+### Auth Flow
+1. User visits `https://agent.brunas.lt/` → nginx redirects unauthenticated users to `/auth/login`
+2. Agent serves login page → user enters Brunas TMS credentials
+3. Agent authenticates against `auth.brunas.lt`, creates in-memory session (8h TTL), sets `agent_sid` cookie
+4. nginx `auth_request` calls `/auth/validate` on every request → gets back `X-User-Email` header
+5. nginx forwards `X-User-Email` to Open WebUI → trusted header auto-login (`WEBUI_AUTH_TRUSTED_EMAIL_HEADER`)
+
+### Access Control
+- **Superadmins** (Brunas `super=true`): full access to all Brunas companies + BSS accounting tools + admin tools
+- **Regular users**: scoped to their own Brunas TMS companies only
+- Admin in Open WebUI: `kasparas.ziuraitis@gmail.com`
+
+### Agent Server Endpoints
+- `POST /auth/login` — Brunas TMS login
+- `POST /auth/select-client` — choose active Brunas company
+- `GET  /auth/me` — current session info
+- `POST /auth/logout` — destroy session
+- `GET  /auth/validate` — internal (nginx auth_request)
+- `GET  /v1/models` — OpenAI-compatible model list (returns `brunas-agent`)
+- `POST /v1/chat/completions` — OpenAI-compatible chat with tool-calling loop (max 15 iterations)
+
+### Key Environment Variables (server `.env`)
+- `AGENT_API_KEY` — shared secret between agent and Open WebUI
+- `OPENAI_API_KEY` — GitHub Models / OpenAI API key for LLM calls
+- `OPENAI_BASE_URL` — LLM endpoint (default: `https://models.inference.ai.azure.com`)
+- `LLM_MODEL` — model name (default: `gpt-4o-mini`)
+
+### Deploying Changes
+```bash
+# From local machine — upload, rebuild, restart
+scp -i D:\inspiron_priv -r dist/ root@167.235.226.121:/opt/agent/dist/
+ssh -i D:\inspiron_priv root@167.235.226.121 "cd /opt/agent && docker compose up -d --build agent"
+
+# Or rebuild everything:
+ssh -i D:\inspiron_priv root@167.235.226.121 "cd /opt/agent && docker compose up -d --build"
+```
+
+### Cert Renewal
+```bash
+ssh -i D:\inspiron_priv root@167.235.226.121 "cd /opt/agent && docker compose run --rm certbot renew && docker compose exec nginx nginx -s reload"
+```
 
 ### MCP References
 - MCP Documentation: https://modelcontextprotocol.io/

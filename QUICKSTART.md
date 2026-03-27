@@ -1,67 +1,83 @@
-git submodule update --init --recursive
-# Quick Start Guide – Automation MCP Server
+# Quick Start Guide
 
-This project ships with multiple MCP entry points. The default `index.ts` exposes generic automation tools (Playwright + command execution) so you can bootstrap new agents without any chat platform dependencies.
-
-## 1. Install & Build
+## Local Development (MCP Servers)
 
 ```bash
 npm install
 git submodule update --init --recursive
+cp .env.example .env   # fill in credentials you need
 npm run build
 ```
 
-## 2. Configure Environment
-
-Copy `.env.example` to `.env` and add only the secrets you need. If you are running the Brunas or BSS servers, place their credentials here. The default automation server can run without any required variables.
-
-## 3. Run a Server
+### Run a server
 
 ```bash
-# Core automation MCP server
-npm start
-
-# Domain servers
-npm run start:brunas
-npm run start:bss
-npm run start:poller
+npm start              # Core automation (Playwright + shell)
+npm run start:brunas   # Brunas TMS MCP server
+npm run start:bss      # BSS accounting MCP server
+npm run start:poller   # WhatsApp poller
+npm run start:agent    # HTTP agent server (local)
 ```
 
-Each command uses the compiled files under `dist/`. Remember to rebuild after making TypeScript changes.
+### Register with VS Code
 
-## 4. Register with Copilot/Claude
+Ensure `.vscode/mcp.json` has the correct paths, then: Command Palette → "GitHub Copilot: Restart MCP Servers".
 
-Ensure `.vscode/mcp.json` points to the binaries you want enabled. The default configuration already wires up:
+## Live Agent Server (agent.brunas.lt)
 
-- `whatsapp` MCP server (Python)
-- `playwright` helper
-- `brunas-tms` Node server
-- `bss-accounting` Node server
+The agent HTTP server runs on a Hetzner VPS behind nginx + Open WebUI.
 
-Start VS Code, open the Command Palette ➜ “GitHub Copilot: Restart MCP Servers” to reload the configuration.
+### First-time server setup
 
-## 5. Available Tools (default server)
+```bash
+# SSH into server
+ssh -i D:\inspiron_priv root@167.235.226.121
 
-- **execute_playwright** – Navigate, click, type, take screenshots, or wait using Playwright.
-- **execute_command** – Execute a shell command with optional arguments (for tightly scoped automation).
+# Files are at /opt/agent/
+cd /opt/agent
 
-Additional servers expose their own MCP tools (e.g., cadency search in Brunas, invoice lookups in BSS, WhatsApp automation flows).
+# Create .env with required variables:
+#   AGENT_API_KEY, OPENAI_API_KEY, OPENAI_BASE_URL, LLM_MODEL
 
-## 6. Debugging Tips
+# Start all services
+docker compose up -d --build
+```
 
-- Use `npm run watch` to rebuild automatically while iterating.
-- Run `npx playwright install chromium` if the executor complains about missing browsers.
-- Confirm the server prints “Automation MCP Server started successfully” in the terminal.
-- If MCP clients cannot connect, double-check `.vscode/mcp.json` paths and rerun the “Restart MCP Servers” command.
+### Deploy code changes
 
-## 7. Next Steps
+```bash
+# Build locally
+npm run build
 
-1. Connect your preferred LLM to the MCP endpoints.
-2. Extend `PlaywrightExecutor` with custom actions if needed.
-3. Build higher-level tools in `src/brunas-*.ts`, `src/bss-*.ts`, or new modules of your choice.
+# Upload compiled JS and rebuild agent container
+scp -i D:\inspiron_priv -r dist/ root@167.235.226.121:/opt/agent/dist/
+ssh -i D:\inspiron_priv root@167.235.226.121 "cd /opt/agent && docker compose up -d --build agent"
+```
 
-With Viber removed, the default server has zero chat platform dependencies—perfect for repurposing in other automation projects.
-- Use webhooks instead of polling
-- Cache expensive operations
+### Check logs
 
-Happy automating! 🎉
+```bash
+ssh -i D:\inspiron_priv root@167.235.226.121 "cd /opt/agent && docker compose logs -f agent"
+ssh -i D:\inspiron_priv root@167.235.226.121 "cd /opt/agent && docker compose logs -f open-webui"
+ssh -i D:\inspiron_priv root@167.235.226.121 "cd /opt/agent && docker compose logs -f nginx"
+```
+
+### SSL cert renewal
+
+```bash
+ssh -i D:\inspiron_priv root@167.235.226.121 "cd /opt/agent && docker compose run --rm certbot renew && docker compose exec nginx nginx -s reload"
+```
+
+## Available Tools (default MCP server)
+
+- **execute_playwright** — Navigate, click, type, take screenshots via Playwright.
+- **execute_command** — Execute a shell command with optional arguments.
+
+Additional servers expose domain-specific tools (Brunas TMS: 30 tools, BSS accounting: 2 tools).
+
+## Debugging Tips
+
+- Run `npm run watch` to rebuild automatically while iterating.
+- Run `npx playwright install chromium` if the executor reports missing browsers.
+- Confirm the server prints startup messages in the terminal.
+- If MCP clients cannot connect, check `.vscode/mcp.json` paths and rerun "Restart MCP Servers".
