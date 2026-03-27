@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Mantas HTTP Server
+ * Brunas AI Agent Server
  *
  * Exposes:
  *  - Auth endpoints (Brunas login, session, client selection)
@@ -41,9 +41,24 @@ const __dirname = path.dirname(__filename);
 const PORT = parseInt(process.env.AGENT_PORT ?? "3002");
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
 const MAX_TOOL_ITERATIONS = 15;
-const LLM_MODEL = process.env.LLM_MODEL ?? "gpt-4o-mini";
+const DEFAULT_LLM_MODEL = (process.env.LLM_MODEL ?? "gpt-4o-mini").trim();
 const AGENT_API_KEY = process.env.AGENT_API_KEY ?? crypto.randomUUID();
 const COOKIE_NAME = "agent_sid";
+
+function parseAllowedModels(raw: string | undefined, defaultModel: string): string[] {
+  const parsed = (raw ?? "")
+    .split(",")
+    .map((m) => m.trim())
+    .filter((m) => m.length > 0);
+
+  if (!parsed.includes(defaultModel)) {
+    parsed.unshift(defaultModel);
+  }
+
+  return Array.from(new Set(parsed));
+}
+
+const ALLOWED_LLM_MODELS = parseAllowedModels(process.env.LLM_MODELS, DEFAULT_LLM_MODEL);
 
 // BSS ERP uses a self-signed certificate
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
@@ -471,9 +486,28 @@ async function executeTool(
       if (!args.id) throw new Error("id is required");
       return JSON.stringify(await client.getVehicle(args.id as string), null, 2);
 
-    case "search_vehicles":
+    case "search_vehicles": {
       if (!args.query) throw new Error("query is required");
-      return JSON.stringify(await client.searchActiveVehicles(args.query as string), null, 2);
+      const query = args.query as string;
+      const activeData = await client.searchActiveVehicles(query) as { data?: unknown[] };
+      if (activeData.data && activeData.data.length > 0) {
+        return JSON.stringify(activeData, null, 2);
+      }
+      // Fallback: search all statuses via datatable
+      const fallbackData = await client.findVehicles(
+        [{ field: "number", operator: "isAnyOfContains", value: [query.replace(/\s+/g, "").toUpperCase()] }],
+        0,
+        25,
+      );
+      const fbObj = (typeof fallbackData === "object" && fallbackData !== null ? fallbackData : {}) as Record<string, unknown>;
+      const fbArr = Array.isArray(fbObj.data) ? fbObj.data : [];
+      const result = {
+        ...fbObj,
+        _source: fbArr.length > 0 ? "find_vehicles_fallback" : "no_results",
+        _note: "Active search returned 0 results. Searched all statuses via find_vehicles.",
+      };
+      return JSON.stringify(result, null, 2);
+    }
 
     case "get_vehicle_by_id":
       if (!args.id) throw new Error("id is required");
@@ -839,6 +873,7 @@ async function handleChat(
   messages: ChatMessage[],
   shouldStream: boolean,
   res: express.Response,
+  model: string,
 ): Promise<void> {
   const tools = getToolsForSession(session);
   const systemPrompt = getSystemPrompt(session);
@@ -850,7 +885,7 @@ async function handleChat(
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
     const response = await openai.chat.completions.create({
-      model: LLM_MODEL,
+      model,
       messages: allMessages as any,
       tools: tools.length > 0 ? (tools as any) : undefined,
     });
@@ -899,12 +934,12 @@ async function handleChat(
   // Max iterations reached
   const fallback = "Maximum tool iterations reached. Please refine your request.";
   if (shouldStream) {
-    simulateStream(res, fallback, "chatcmpl-limit", LLM_MODEL);
+    simulateStream(res, fallback, "chatcmpl-limit", model);
   } else {
     res.json({
       id: "chatcmpl-limit",
       object: "chat.completion",
-      model: LLM_MODEL,
+      model,
       choices: [{ index: 0, message: { role: "assistant", content: fallback }, finish_reason: "stop" }],
     });
   }
@@ -1288,15 +1323,13 @@ function resolveApiSession(req: express.Request): UserSession | null {
 app.get("/v1/models", (req, res) => {
   res.json({
     object: "list",
-    data: [
-      {
-        id: "mantas",
-        object: "model",
-        created: Math.floor(Date.now() / 1000),
-        owned_by: "brunas",
-        name: "Mantas",
-      },
-    ],
+    data: ALLOWED_LLM_MODELS.map((modelId) => ({
+      id: modelId,
+      object: "model",
+      created: Math.floor(Date.now() / 1000),
+      owned_by: "brunas",
+      name: modelId,
+    })),
   });
 });
 
@@ -1312,7 +1345,21 @@ app.post("/v1/chat/completions", async (req, res) => {
   const { messages, stream } = req.body as {
     messages?: ChatMessage[];
     stream?: boolean;
+    model?: string;
   };
+
+  const requestedModel = typeof req.body?.model === "string" ? req.body.model.trim() : "";
+  const selectedModel = requestedModel || DEFAULT_LLM_MODEL;
+
+  if (!ALLOWED_LLM_MODELS.includes(selectedModel)) {
+    res.status(400).json({
+      error: {
+        message: `Unsupported model \"${selectedModel}\". Allowed models: ${ALLOWED_LLM_MODELS.join(", ")}`,
+        type: "invalid_request",
+      },
+    });
+    return;
+  }
 
   if (!messages || !Array.isArray(messages)) {
     res.status(400).json({
@@ -1322,7 +1369,8 @@ app.post("/v1/chat/completions", async (req, res) => {
   }
 
   try {
-    await handleChat(session, messages, stream ?? false, res);
+    console.log(`[chat] user=${session.email} model=${selectedModel} stream=${stream ?? false}`);
+    await handleChat(session, messages, stream ?? false, res, selectedModel);
   } catch (err) {
     console.error("Chat error:", err);
     const msg = err instanceof Error ? err.message : String(err);
@@ -1337,7 +1385,7 @@ app.post("/v1/chat/completions", async (req, res) => {
 // ─── Start ───────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
-  console.log(`Mantas server running on port ${PORT}`);
+  console.log(`Brunas AI Agent server running on port ${PORT}`);
   console.log(`Login page: http://localhost:${PORT}/auth/login`);
   console.log(`API key for Open WebUI: ${AGENT_API_KEY}`);
 });

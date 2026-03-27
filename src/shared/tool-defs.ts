@@ -205,7 +205,7 @@ export const BRUNAS_TOOL_DEFS: ToolDef[] = [
   },
   {
     name: "search_vehicles",
-    description: "Search active vehicles by plate number or name query.",
+    description: "Search vehicles by plate number or name. Searches active first; if nothing found, automatically falls back to all statuses (disassembled, sold, etc.).",
     inputSchema: {
       type: "object",
       properties: { query: { type: "string", description: "Search query (e.g. 'NBO401')" } },

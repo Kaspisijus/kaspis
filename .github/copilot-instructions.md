@@ -182,3 +182,45 @@ Payload reliability rules:
 Behavior rules:
 - Include precheck result in operation output when possible.
 - If precheck finds intersecting links, show those conflicts to the user before continuing.
+
+---
+
+# Brunas TMS — Vehicle Search Strategy
+
+When searching for a vehicle by plate number (e.g. "surask vilkiką ABC001"):
+
+1. Use `search_vehicles` — it automatically searches active vehicles first, then falls back to all statuses (disassembled, sold, archived) if nothing is found.
+2. Check the `_source` field in the response:
+   - Missing or absent → found among active vehicles.
+   - `"find_vehicles_fallback"` → found among inactive/disassembled vehicles. Always mention the vehicle's status to the user.
+   - `"no_results"` → not found at all. Suggest partial plate search or alternative queries.
+3. If the user asks to "find a truck" and the result is a trailer (different entity), clearly state it is a trailer, not a truck.
+
+---
+
+# Brunas TMS — Admin Knowledge Base
+
+The agent maintains a knowledge base file at `.github/brunas-knowhow.md` in this repository.
+This file contains lessons learned, common pitfalls, and verified patterns discovered during real usage.
+
+**How it works:**
+- When the administrator (user) tells the agent something like "zapamiętaj" / "prisimink" / "remember this" / "įsidėk", the agent MUST append the insight to `.github/brunas-knowhow.md`.
+- Before executing Brunas TMS operations, the agent SHOULD consult `.github/brunas-knowhow.md` for relevant tips.
+- The administrator can also say "parodyk knowhow" / "show knowhow" to review the current knowledge base.
+- Entries should be concise bullet points grouped by topic (Vehicles, Trailers, Carriages, Cadencies, Drivers, General).
+
+**Format:**
+```markdown
+## Vehicles
+- `search_vehicles` auto-falls back to all statuses. If vehicle has status 1 (disassembled), mention it explicitly.
+- Vehicle status values: 0=Active, 1=Disassembled, 2=Sold, 3=ReRegistered, 4=Temp, 5=Unexploited, 9=Deleted.
+
+## Trailers
+- (tips here)
+
+## Carriages
+- (tips here)
+
+## General
+- (tips here)
+```

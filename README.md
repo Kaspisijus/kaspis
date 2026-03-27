@@ -69,7 +69,8 @@ Create a `.env` file based on `.env.example`. Key variables:
 |---|---|---|
 | `OPENAI_API_KEY` | Agent server | GitHub Models / OpenAI API key |
 | `OPENAI_BASE_URL` | Agent server | LLM endpoint (default: `https://models.inference.ai.azure.com`) |
-| `LLM_MODEL` | Agent server | Model name (default: `gpt-4o-mini`) |
+| `LLM_MODEL` | Agent server | Default model name (default: `gpt-4o-mini`) |
+| `LLM_MODELS` | Agent server | Optional comma-separated allowlist for `/v1/models` and request-time model selection |
 | `AGENT_API_KEY` | Agent server | Shared secret between agent and Open WebUI |
 | `AGENT_PORT` | Agent server | HTTP port (default: `3002`) |
 | `BRUNAS_API_URL` | Brunas MCP | Brunas TMS API base URL |
@@ -121,7 +122,7 @@ Create a `.env` file based on `.env.example`. Key variables:
 | `GET` | `/auth/me` | Current session info |
 | `POST` | `/auth/logout` | Destroy session |
 | `GET` | `/auth/validate` | Internal — nginx auth_request |
-| `GET` | `/v1/models` | OpenAI-compatible model list (`brunas-agent`) |
+| `GET` | `/v1/models` | OpenAI-compatible model list (from configured `LLM_MODELS`) |
 | `POST` | `/v1/chat/completions` | Chat with tool-calling loop (max 15 iterations) |
 
 ### Deploying Changes

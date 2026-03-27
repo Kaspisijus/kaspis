@@ -819,7 +819,7 @@ const tools = [
   },
   {
     name: "search_vehicles",
-    description: "Search active vehicles by plate number or name query. Returns matching vehicles with id, number, name, vin, owner, manager, etc. Use this to find vehicle IDs for carriage filtering.",
+    description: "Search vehicles by plate number or name. Searches active first; if nothing found, automatically falls back to all statuses (disassembled, sold, etc.). Returns matching vehicles with id, number, name, vin, owner, manager, etc.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1652,15 +1652,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      // ── Search active vehicles ────────────────────────────────
+      // ── Search vehicles (active first, then fallback to all) ───
       case "search_vehicles": {
         const query = args.query as string;
         if (!query) {
           throw new McpError(ErrorCode.InvalidRequest, "query is required");
         }
-        const data = await client.searchActiveVehicles(query);
+        const activeData = await client.searchActiveVehicles(query) as { data?: unknown[] };
+        if (activeData.data && activeData.data.length > 0) {
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(activeData, null, 2) }],
+          };
+        }
+        // Fallback: search all statuses via datatable
+        const fallbackData = await client.findVehicles(
+          [{ field: "number", operator: "isAnyOfContains", value: [query.replace(/\s+/g, "").toUpperCase()] }],
+          0,
+          25,
+        );
+        const fbObj = (typeof fallbackData === "object" && fallbackData !== null ? fallbackData : {}) as Record<string, unknown>;
+        const fbArr = Array.isArray(fbObj.data) ? fbObj.data : [];
+        const result = {
+          ...fbObj,
+          _source: fbArr.length > 0 ? "find_vehicles_fallback" : "no_results",
+          _note: "Active search returned 0 results. Searched all statuses via find_vehicles.",
+        };
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
         };
       }
 
