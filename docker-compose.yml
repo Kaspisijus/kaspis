@@ -32,6 +32,8 @@ services:
       - ENABLE_FORWARD_USER_INFO_HEADERS=true
       # Default model (must match an ID from LLM_MODELS / LLM_MODEL)
       - DEFAULT_MODELS=gpt-4o-mini
+      # Bypass Open WebUI model access control (agent enforces its own)
+      - BYPASS_MODEL_ACCESS_CONTROL=true
       - DEFAULT_PROMPT_SUGGESTIONS=[{"title":["Surask vilkik\u0105 ABC001",""] ,"content":"Surask vilkik\u0105 ABC001"},{"title":["registruok gedim\u0105 vilkikui ABC001, skubus, du\u017e\u0119s priekinis langas",""] ,"content":"registruok gedim\u0105 vilkikui ABC001, skubus, du\u017e\u0119s priekinis langas"},{"title":["Sukurk vairuotoj\u0105 Petras Petraitis, gimimo metai 1985-01-01",""] ,"content":"Sukurk vairuotoj\u0105 Petras Petraitis, gimimo metai 1985-01-01"},{"title":["sujunk vilkik\u0105 ABC001 su priekaba AE5555",""] ,"content":"sujunk vilkik\u0105 ABC001 su priekaba AE5555"},{"title":["sukurk vairuotojui Jonas Jonaitis kadencij\u0105 su vilkiku ABC001 nuo 2026-03-01",""] ,"content":"sukurk vairuotojui Jonas Jonaitis kadencij\u0105 su vilkiku ABC001 nuo 2026-03-01"}]
       # Logging (use DEBUG only when troubleshooting)
       - GLOBAL_LOG_LEVEL=INFO

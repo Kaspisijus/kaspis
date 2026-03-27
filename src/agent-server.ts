@@ -1320,7 +1320,8 @@ function resolveApiSession(req: express.Request): UserSession | null {
   return null;
 }
 
-app.get("/v1/models", (req, res) => {
+app.get("/v1/models", (_req, res) => {
+  // Return all models; per-user access is enforced at /v1/chat/completions
   res.json({
     object: "list",
     data: ALLOWED_LLM_MODELS.map((modelId) => ({
@@ -1356,6 +1357,17 @@ app.post("/v1/chat/completions", async (req, res) => {
       error: {
         message: `Unsupported model \"${selectedModel}\". Allowed models: ${ALLOWED_LLM_MODELS.join(", ")}`,
         type: "invalid_request",
+      },
+    });
+    return;
+  }
+
+  // Non-super users can only use the default model
+  if (!session.isSuper && selectedModel !== DEFAULT_LLM_MODEL) {
+    res.status(403).json({
+      error: {
+        message: `Model \"${selectedModel}\" is only available to super users. Your model: ${DEFAULT_LLM_MODEL}`,
+        type: "permission_error",
       },
     });
     return;
