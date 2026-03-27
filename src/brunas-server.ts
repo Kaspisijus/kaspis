@@ -9,8 +9,14 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import axios from "axios";
 import express from "express";
+import * as fs from "fs";
+import * as path from "path";
+import { fileURLToPath } from "url";
 import { chromium } from "playwright";
 import { BrunasApiClient } from "./brunas-api.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Simple error classes (same pattern as index.ts)
 class McpError extends Error {
@@ -35,6 +41,12 @@ interface ClientInfo {
   id: string;
   name: string;
   domain: string;
+}
+
+interface ClientSelectionMessageOptions {
+  title: string;
+  instruction: string;
+  isSuper?: boolean;
 }
 
 let storedJwt: string | null = null;
@@ -74,7 +86,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <div class="card">
-    <img src="https://savitarna.brunas.lt/assets/brunas-logo-transparent-apkDHNna.png" alt="Brunas" class="logo">
+    <img src="/logo.png" alt="Brunas" class="logo">
     <p class="sub">Sign in to connect your account</p>
     <div class="error" id="err"></div>
     <div class="success" id="ok"></div>
@@ -140,6 +152,15 @@ async function performBrowserLogin(): Promise<{ jwt: string }> {
 
     let settled = false;
     let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+
+    app.get("/logo.png", (_req, res) => {
+      const logoPath = path.join(__dirname, "..", "src", "brunas_logo.png");
+      if (fs.existsSync(logoPath)) {
+        res.type("png").sendFile(logoPath);
+      } else {
+        res.status(404).end();
+      }
+    });
 
     app.get("/", (_req, res) => {
       res.type("html").send(LOGIN_HTML);
@@ -260,6 +281,24 @@ async function resolveClients(
   return { isSuper, clients };
 }
 
+function formatClientSelectionMessage(
+  clients: ClientInfo[],
+  options: ClientSelectionMessageOptions
+): string {
+  const listing = clients
+    .map((c, i) => `${i + 1}. ${c.name} - ${c.domain}`)
+    .join("\n");
+
+  return [
+    `${options.title}${options.isSuper ? " (super user)" : ""}`,
+    `Accessible clients (${clients.length}):`,
+    listing,
+    "",
+    options.instruction,
+    `Accepted input: exact client name or exact domain.`,
+  ].join("\n");
+}
+
 /**
  * Get (or create) the BrunasApiClient. Triggers browser login and
  * client resolution as needed.
@@ -295,12 +334,12 @@ async function getClient(): Promise<BrunasApiClient> {
 
   // Step 3: ensure a client is selected
   if (!selectedClientId) {
-    const listing = resolvedClients
-      .map((c, i) => `${i + 1}. ${c.name} (https://${c.domain}) — ID: ${c.id}`)
-      .join("\n");
     throw new McpError(
       ErrorCode.InvalidRequest,
-      `Multiple clients available. Call brunas_select_client with clientId:\n${listing}`
+      formatClientSelectionMessage(resolvedClients, {
+        title: "Multiple clients available and none is selected.",
+        instruction: "Call brunas_select_client with the exact client name or domain to continue.",
+      })
     );
   }
 
@@ -602,7 +641,7 @@ const tools = [
   {
     name: "brunas_login",
     description:
-      "Authenticate to Brunas TMS by opening a browser login window. Opens a Chromium browser to the Brunas login page — log in manually. After login, resolves available clients. If only one client is accessible, it is auto-selected. If multiple clients are available, returns the list and requires a follow-up call to brunas_select_client.",
+      "Authenticate to Brunas TMS by opening a browser login window. Opens a Chromium browser to the Brunas login page — log in manually. After login, resolves accessible clients. If only one client is accessible, it is auto-selected. If multiple clients are available, always returns a numbered list with client names and domains and asks for a follow-up brunas_select_client call.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -620,13 +659,13 @@ const tools = [
   {
     name: "brunas_select_client",
     description:
-      "Select which Brunas client (company) to work with. Use after brunas_login when multiple clients are available. Pass the client ID from the list returned by brunas_login.",
+      "Select which Brunas client (company) to work with. Use after brunas_login when multiple clients are available. Pass the exact client name or exact domain from the list returned by brunas_login.",
     inputSchema: {
       type: "object",
       properties: {
         clientId: {
           type: "string",
-          description: "Client ID or exact client name to select",
+          description: "Exact client name or exact domain to select",
         },
       },
       required: ["clientId"],
@@ -1189,13 +1228,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      const listing = clients
-        .map((c, i) => `${i + 1}. ${c.name} (https://${c.domain}) — ID: ${c.id}`)
-        .join("\n");
       return {
         content: [{
           type: "text" as const,
-          text: `Logged in${isSuper ? " (super user)" : ""}. Multiple clients available:\n${listing}\n\nCall brunas_select_client with the client ID to continue.`,
+          text: formatClientSelectionMessage(clients, {
+            title: "Logged in. Multiple clients available.",
+            instruction: "Call brunas_select_client with the exact client name or domain to continue.",
+            isSuper,
+          }),
         }],
       };
     }
@@ -1246,15 +1286,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       const match = resolvedClients.find(
-        (c) => c.id === clientId || c.name.toLowerCase() === clientId.toLowerCase()
+        (c) =>
+          c.id === clientId ||
+          c.name.toLowerCase() === clientId.toLowerCase() ||
+          c.domain.toLowerCase() === clientId.toLowerCase()
       );
       if (!match) {
-        const listing = resolvedClients
-          .map((c) => `- ${c.name} (${c.id})`)
-          .join("\n");
         throw new McpError(
           ErrorCode.InvalidRequest,
-          `Client "${clientId}" not found. Available clients:\n${listing}`
+          `Client "${clientId}" not found.\n\n${formatClientSelectionMessage(resolvedClients, {
+            title: "Available clients:",
+            instruction: "Retry brunas_select_client with one of the names or domains above.",
+          })}`
         );
       }
 
@@ -2208,6 +2251,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         );
     }
   } catch (error: unknown) {
+    if (error instanceof McpError &&
+      error.message.includes("Multiple clients available and none is selected.")) {
+      return {
+        content: [{ type: "text" as const, text: error.message }],
+      };
+    }
+
     if (error instanceof McpError) throw error;
     // Extract Axios response details if available
     const axiosErr = error as { response?: { status?: number; data?: unknown } };
