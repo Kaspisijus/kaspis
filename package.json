@@ -12,6 +12,7 @@
     "start:brunas": "node dist/brunas-server.js",
     "start:bss": "node dist/bss-server.js",
     "start:poller": "node dist/whatsapp-poller.js",
+    "start:agent": "node dist/agent-server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [

@@ -1,0 +1,79 @@
+services:
+  agent:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - AGENT_PORT=3002
+      - AGENT_API_KEY=${AGENT_API_KEY}
+    expose:
+      - "3002"
+    networks:
+      - internal
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    restart: unless-stopped
+    environment:
+      # Connect to our agent server as the OpenAI-compatible backend
+      - OPENAI_API_BASE_URLS=http://agent:3002/v1
+      - OPENAI_API_KEYS=${AGENT_API_KEY}
+      - ENABLE_OPENAI_API=true
+      # Disable Ollama (not used)
+      - ENABLE_OLLAMA_API=false
+      # Trusted header auth — nginx sets X-User-Email after validating session
+      - WEBUI_AUTH_TRUSTED_EMAIL_HEADER=X-User-Email
+      - WEBUI_AUTH_TRUSTED_HEADER_AUTO_SIGNUP=true
+      - ENABLE_SIGNUP=false
+      - WEBUI_URL=https://agent.brunas.lt
+      # Auto-activate new users (no admin approval needed)
+      - DEFAULT_USER_ROLE=user
+      # Forward user email to backend API
+      - ENABLE_FORWARD_USER_INFO_HEADERS=true
+      # Default model
+      - DEFAULT_MODELS=brunas-agent
+      # Debug logging
+      - GLOBAL_LOG_LEVEL=DEBUG
+    volumes:
+      - open-webui-data:/app/backend/data
+    expose:
+      - "8080"
+    depends_on:
+      - agent
+    networks:
+      - internal
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - certbot-data:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    depends_on:
+      - agent
+      - open-webui
+    networks:
+      - internal
+
+  # Run once to get initial cert:
+  #   docker compose run --rm certbot certonly --webroot -w /var/www/certbot -d agent.brunas.lt
+  # Renewal: docker compose run --rm certbot renew
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - certbot-data:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    profiles:
+      - certbot
+
+volumes:
+  open-webui-data:
+  certbot-data:
+  certbot-www:
+
+networks:
+  internal:
