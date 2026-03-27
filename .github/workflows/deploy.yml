@@ -1,0 +1,46 @@
+name: Deploy to Live Server
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+
+      - name: Deploy files to server
+        run: |
+          SSH_CMD="ssh -i ~/.ssh/deploy_key root@${{ secrets.SERVER_IP }}"
+          SCP_CMD="scp -i ~/.ssh/deploy_key"
+
+          # Upload built files and configs
+          $SCP_CMD -r dist/ root@${{ secrets.SERVER_IP }}:/opt/agent/dist/
+          $SCP_CMD package.json package-lock.json root@${{ secrets.SERVER_IP }}:/opt/agent/
+          $SCP_CMD Dockerfile docker-compose.yml root@${{ secrets.SERVER_IP }}:/opt/agent/
+          $SCP_CMD -r nginx/ root@${{ secrets.SERVER_IP }}:/opt/agent/nginx/
+          $SCP_CMD src/brunas_logo.png root@${{ secrets.SERVER_IP }}:/opt/agent/src/brunas_logo.png
+
+      - name: Rebuild and restart agent container
+        run: |
+          ssh -i ~/.ssh/deploy_key root@${{ secrets.SERVER_IP }} \
+            "cd /opt/agent && docker compose up -d --build agent"
