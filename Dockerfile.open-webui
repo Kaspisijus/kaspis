@@ -1,0 +1,11 @@
+FROM ghcr.io/open-webui/open-webui:main
+
+# Copy the patch script
+COPY scripts/patch-open-webui-suggestions.sh /app/patch-suggestions.sh
+RUN chmod +x /app/patch-suggestions.sh
+
+# Run patch before starting the app
+RUN /app/patch-suggestions.sh
+
+# Keep original entrypoint
+ENTRYPOINT ["/bin/bash", "-c", "sh /app/docker/entrypoint.sh"]

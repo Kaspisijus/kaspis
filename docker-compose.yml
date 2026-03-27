@@ -12,7 +12,9 @@ services:
       - internal
 
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    build:
+      context: .
+      dockerfile: Dockerfile.open-webui
     restart: unless-stopped
     environment:
       # Connect to our agent server as the OpenAI-compatible backend
